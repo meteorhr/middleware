@@ -69,9 +69,9 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     expired_at: { $gte: currentDate }
   }
   const doc = {
-    token:  uuidv4(), // New Refresh Token
-    updated_at: currentDate, // Current Date 
-    expired_at: expiredDate, // Current Data + 60 days
+    //token:  uuidv4(), // New Refresh Token
+    //updated_at: currentDate, // Current Date 
+    //expired_at: expiredDate, // Current Data + 60 days
   }  
 
   console.log(findDoc)
