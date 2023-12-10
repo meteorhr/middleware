@@ -69,8 +69,7 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     expired_at: { $gte: currentDate }
   }
   console.log(findDoc)
-  const find = await RefreshToken
-  .findOne(findDoc)
+  const find = await RefreshToken.find()
 
   console.log(find)
   
