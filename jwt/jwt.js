@@ -68,10 +68,16 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     deviceId: deviceId,
     expired_at: { $gte: currentDate }
   }
+
+  const find = await RefreshToken
+  .findOne(findDoc)
+
+  console.log(find)
+  
   const doc = {
-    //token:  uuidv4(), // New Refresh Token
-    //updated_at: currentDate, // Current Date 
-    //expired_at: expiredDate, // Current Data + 60 days
+    token:  uuidv4(), // New Refresh Token
+    updated_at: currentDate, // Current Date 
+    expired_at: expiredDate, // Current Data + 60 days
   }  
 
   console.log(findDoc)
@@ -80,7 +86,7 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
   const update = await RefreshToken
     .findOneAndUpdate(findDoc, {$set: doc}, {
       new: true,
-      fields: { token:1, userId: 1 },
+      //fields: { token:1, userId: 1 },
     })
     .populate(
       { 
