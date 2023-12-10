@@ -23,15 +23,12 @@ const RefreshTokenUpdate = async (req, res, next) => {
     console.info('Find refresh token');
 
     const findAndUpdate = await findRefreshTokenAndUpdated(refreshToken, deviceId);
-    console.log(findAndUpdate);
 
     if(!findAndUpdate){
       await removeInvalidRefreshToken(refreshToken);
       const errorResponse =  handleRefreshTokenNotUpdate(res);  
       return res.send(errorResponse);
     }
-
-    console.info('Refresh token DB Update');
 
     // Создание нового AccessToken
     const payload = findAndUpdate.userId;
@@ -47,7 +44,6 @@ const RefreshTokenUpdate = async (req, res, next) => {
     
     return next;
   } catch (error) {
-    console.log(error)
     return res.send(handleServerError(res, error));
   }
 };
@@ -68,10 +64,6 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     deviceId: deviceId,
     expired_at: { $gte: currentDate }
   }
-  console.log(findDoc)
-  const find = await RefreshToken.find()
-
-  console.log(find)
   
   const doc = {
     token:  uuidv4(), // New Refresh Token
@@ -79,8 +71,6 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     expired_at: expiredDate, // Current Data + 60 days
   }  
 
-  
-  console.log(doc)
 
   const update = await RefreshToken
     .findOneAndUpdate(findDoc, {$set: doc}, {
@@ -94,7 +84,6 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
         model: User 
       }
     );
-  console.log(update);
   return update;
 }
 
