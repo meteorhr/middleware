@@ -68,35 +68,35 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     deviceId: deviceId,
     expired_at: { $gte: currentDate }
   }
-
+  console.log(findDoc)
   const find = await RefreshToken
   .findOne(findDoc)
 
   console.log(find)
   
-  const doc = {
-    token:  uuidv4(), // New Refresh Token
-    updated_at: currentDate, // Current Date 
-    expired_at: expiredDate, // Current Data + 60 days
-  }  
+  //const doc = {
+ //   token:  uuidv4(), // New Refresh Token
+ //   updated_at: currentDate, // Current Date 
+ //   expired_at: expiredDate, // Current Data + 60 days
+ // }  
 
-  console.log(findDoc)
-  console.log(doc)
+  
+  //console.log(doc)
 
-  const update = await RefreshToken
-    .findOneAndUpdate(findDoc, {$set: doc}, {
-      new: true,
+  //const update = await RefreshToken
+  //  .findOneAndUpdate(findDoc, {$set: doc}, {
+  //    new: true,
       //fields: { token:1, userId: 1 },
-    })
-    .populate(
-      { 
-        path: 'userId', 
-        select: 'email phone telegram notification roles active name avatar company', 
-        model: User 
-      }
-    );
-  console.log(update);
-  return update
+  //  })
+  //  .populate(
+  //    { 
+  //      path: 'userId', 
+  //      select: 'email phone telegram notification roles active name avatar company', 
+  //      model: User 
+  //    }
+  //  );
+  //console.log(update);
+  return null;
 }
 
 const removeInvalidRefreshToken = async (refreshToken) => {
