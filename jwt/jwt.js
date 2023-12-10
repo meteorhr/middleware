@@ -53,7 +53,7 @@ const RefreshTokenUpdate = async (req, res, next) => {
 
 const generateAccessToken = (payload) => {
   return jwt.sign({ payload }, privateKey, {
-    expiresIn: `${expires}s`,
+    expiresIn: `${expires}m`,
     algorithm: 'RS256'
   });
 };
