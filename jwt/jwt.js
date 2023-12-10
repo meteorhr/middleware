@@ -24,7 +24,7 @@ const RefreshTokenUpdate = async (req, res, next) => {
 
     const findAndUpdate = await findRefreshTokenAndUpdated(refreshToken, deviceId);
     console.log(findAndUpdate);
-    
+
     if(!findAndUpdate){
       await removeInvalidRefreshToken(refreshToken);
       const errorResponse =  handleRefreshTokenNotUpdate(res);  
@@ -74,6 +74,9 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     expired_at: expiredDate, // Current Data + 60 days
   }  
 
+  console.log(findDoc)
+  console.log(doc)
+
   const update = await RefreshToken
     .findOneAndUpdate(findDoc, {$set: doc}, {
       new: true,
@@ -86,6 +89,7 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
         model: User 
       }
     );
+  console.log(update);
   return update
 }
 
