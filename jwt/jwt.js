@@ -23,7 +23,8 @@ const RefreshTokenUpdate = async (req, res, next) => {
     console.info('Find refresh token');
 
     const findAndUpdate = await findRefreshTokenAndUpdated(refreshToken, deviceId);
-
+    console.log(findAndUpdate);
+    
     if(!findAndUpdate){
       await removeInvalidRefreshToken(refreshToken);
       const errorResponse =  handleRefreshTokenNotUpdate(res);  
