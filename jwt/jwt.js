@@ -86,7 +86,7 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
         model: User,
         populate: {
           path: 'company', 
-          select: 'address name', 
+          select: 'currency', 
           model: Company,
           populate: {
             path: 'currency', 
