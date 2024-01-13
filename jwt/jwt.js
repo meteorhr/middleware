@@ -3,6 +3,8 @@ import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import RefreshToken from './models/refreshToken.model.js';
 import User from './models/user.model.js';
+import Currencies from './models/currency.model.js';
+import Company from './models/company.model.js';
 
 const privateKey = fs.readFileSync('./keys/private.key', 'utf8');
 const expires = process.env.TOKEN_EXPIRATION_MINUTES;
@@ -81,7 +83,17 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
       { 
         path: 'userId', 
         select: 'email phone telegram notification roles active name avatar company', 
-        model: User 
+        model: User,
+        populate: {
+          path: 'company', 
+          select: 'address name', 
+          model: Company,
+          populate: {
+            path: 'currency', 
+            select: 'code', 
+            model: Currencies,
+          }
+        }
       }
     );
   return update;
@@ -135,8 +147,8 @@ export default () => {
       const {headers, cookies} = req;
       // Получения refreshToken
       const refreshToken = cookies.refreshToken;
-      console.log(cookies);
-      console.log("Refresh Token: " + refreshToken);
+      //console.log(cookies);
+      //console.log("Refresh Token: " + refreshToken);
       // Если отсутствует Device ID в запросе, обнулить куки, поставить статус ответа 401, направить сообще об ошибки в формате JSON
       if(!headers[HEADER_DEVICE_ID]){
         return res.send(setCookieAndSendErrorMessage(res, 'Headers not found device id'));
