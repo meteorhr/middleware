@@ -84,7 +84,16 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
         path: 'userId', 
         select: 'email phone telegram notification roles active name avatar company', 
         model: User,
-
+        populate: {
+          path: 'company', 
+          select: 'address name', 
+          model: Company,
+          populate: {
+            path: 'currency', 
+            select: 'code', 
+            model: Currencies,
+          }
+        }
       }
     );
   return update;
