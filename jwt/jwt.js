@@ -37,7 +37,7 @@ const RefreshTokenUpdate = async (req, res, next) => {
     req.accessToken = generateAccessToken(payload);
     req.session = {
       _id: payload._id,
-      company: payload.company,
+      company: payload.company._id,
       deviceId: deviceId
     }
     
@@ -96,9 +96,6 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
         }
       }
     );
-  
-    update.base_currency = update.company.currency
-    update.company = update.company._id
 
   return update;
 }
@@ -173,7 +170,7 @@ export default () => {
                 req.accessToken = generateAccessToken(payload);
                 req.session = {
                   _id: payload._id,
-                  company: payload.company,
+                  company: payload.company._id,
                   deviceId: headers[HEADER_DEVICE_ID]
                 }
                 return next;
