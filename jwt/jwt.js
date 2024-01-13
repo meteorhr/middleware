@@ -96,6 +96,10 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
         }
       }
     );
+  
+    update.base_currency = update.company.currency
+    update.company = update.company._id
+
   return update;
 }
 
