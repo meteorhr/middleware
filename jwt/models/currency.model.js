@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import Config from '../../config/mongodb.js'; 
+import Config from '../config/mongodb.js'; 
 
 const _db = await mongoose.createConnection(
   Config.fin,
