@@ -119,7 +119,7 @@ const setCookieAndSendErrorMessage = (res, errorMsg) => {
     domain: process.env.DOMAIN,
     path: '/',
   });
-  res.status(401);
+  res.status(200);
   return { success: false, code: 401, msg: errorMsg };
 };
 
