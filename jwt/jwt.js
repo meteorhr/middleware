@@ -146,6 +146,7 @@ export default () => {
     try { 
       // Получения headers, cookies из запроса 
       const {headers, cookies} = req;
+      console.log(req);
       // Получения refreshToken
       const refreshToken = cookies.refreshToken;
       //console.log(cookies);
