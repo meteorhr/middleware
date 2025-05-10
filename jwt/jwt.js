@@ -20,10 +20,6 @@ const RefreshTokenUpdate = async (req, res, next) => {
     const refreshToken = cookies.refreshToken;
     const deviceId = headers[HEADER_DEVICE_ID];
 
-    //console.info('Device ID Headers: ' + deviceId);
-    //console.info('Refresh Token Cookies: ' + refreshToken);
-    //console.info('Find refresh token');
-
     const findAndUpdate = await findRefreshTokenAndUpdated(refreshToken, deviceId);
 
     if(!findAndUpdate){
@@ -146,11 +142,8 @@ export default () => {
     try { 
       // Получения headers, cookies из запроса 
       const {headers, cookies} = req;
-      console.log(req);
       // Получения refreshToken
       const refreshToken = cookies.refreshToken;
-      //console.log(cookies);
-      //console.log("Refresh Token: " + refreshToken);
       // Если отсутствует Device ID в запросе, обнулить куки, поставить статус ответа 401, направить сообще об ошибки в формате JSON
       if(!headers[HEADER_DEVICE_ID]){
         return res.send(setCookieAndSendErrorMessage(res, 'Headers not found device id'));
