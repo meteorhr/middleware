@@ -181,7 +181,7 @@ const setRefreshTokenCookie = (res, token) => {
     expires: expiresTime,
     httpOnly: true, // КРАЙНЕ ВАЖНО для безопасности
     secure: process.env.NODE_ENV === 'production', // КРАЙНЕ ВАЖНО для безопасности
-    sameSite: 'Lax',  // Защита от CSRF. Можно использовать 'Strict' для большей безопасности.
+    //sameSite: 'Lax',  // Защита от CSRF. Можно использовать 'Strict' для большей безопасности.
     domain: process.env.DOMAIN,
     path: '/'
   });
