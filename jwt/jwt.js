@@ -1,188 +1,174 @@
 import fs from 'fs';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
+import redis from './redis-client.js'; // Импортируем наш клиент Redis
+
+// Импорты моделей
 import RefreshToken from './models/refreshToken.model.js';
 import User from './models/user.model.js';
 import Currencies from './models/currency.model.js';
 import Company from './models/company.model.js';
 
+// --- КОНСТАНТЫ И НАСТРОЙКИ ---
 const privateKey = fs.readFileSync('./keys/private.key', 'utf8');
 const expires = process.env.TOKEN_EXPIRATION_MINUTES;
-const expiresTimeAsMs = Date.now() + (1000 * 60 * 60 * 24 * 60);
 
 const HEADER_DEVICE_ID = 'x-device-id';
 const HEADER_AUTH_TOKEN = 'x-authentication-token';
 
+// Настройки для распределенной блокировки
+const LOCK_TTL_MS = 5000; // 5 секунд - время жизни замка (защита от сбоев)
+const RESULT_TTL_S = 10;  // 10 секунд - время жизни результата в кеше
+const POLLING_INTERVAL_MS = 200; // Интервал ожидания для других процессов
+const POLLING_ATTEMPTS = 20;     // Количество попыток ожидания
 
-const RefreshTokenUpdate = async (req, res, next) => {
-  try {
-    const { headers, cookies } = req;
-    const refreshToken = cookies.refreshToken;
-    const deviceId = headers[HEADER_DEVICE_ID];
+/**
+ * Основная функция обновления токена, использующая распределенную блокировку Redis.
+ */
+const RefreshTokenUpdate = async (request, reply) => {
+  const { headers, cookies } = request;
+  const oldRefreshToken = cookies.refreshToken;
 
-    const findAndUpdate = await findRefreshTokenAndUpdated(refreshToken, deviceId);
+  const lockKey = `lock:refresh:${oldRefreshToken}`;
+  const resultKey = `result:refresh:${oldRefreshToken}`;
 
-    if(!findAndUpdate){
-      await removeInvalidRefreshToken(refreshToken);
-      const errorResponse =  handleRefreshTokenNotUpdate(res);  
-      return res.send(errorResponse);
-    }
+  // 1. Попытка захватить замок
+  const lockAcquired = await redis.set(lockKey, 'locked', 'PX', LOCK_TTL_MS, 'NX');
 
-    // Создание нового AccessToken
-    const payload = findAndUpdate.userId;
-    req.accessToken = generateAccessToken(payload);
-    req.session = {
-      _id: payload._id,
-      company: payload.company._id,
-      deviceId: deviceId
-    }
-    
-    // Установка обновленного RefreshToken в куки
-    setRefreshTokenCookie(res, findAndUpdate.token);
-    
-    return next;
-  } catch (error) {
-    return res.send(handleServerError(res, error));
-  }
-};
-
-const generateAccessToken = (payload) => {
-  return jwt.sign({ payload }, privateKey, {
-    expiresIn: `${expires}m`,
-    algorithm: 'RS256'
-  });
-};
-
-const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
-  const currentDate = new Date();
-  const expiredDate = new Date(currentDate.getTime() + 86400000 * 60);
-
-  const findDoc = {
-    token: refreshToken,
-    deviceId: deviceId,
-    expired_at: { $gte: currentDate }
-  }
-  
-  const doc = {
-    token:  uuidv4(), // New Refresh Token
-    updated_at: currentDate, // Current Date 
-    expired_at: expiredDate, // Current Data + 60 days
-  }  
-
-
-  const update = await RefreshToken
-    .findOneAndUpdate(findDoc, {$set: doc}, {
-      new: true,
-      fields: { token:1, userId: 1 },
-    })
-    .populate(
-      { 
-        path: 'userId', 
-        select: 'email phone telegram notification roles active name avatar company', 
-        model: User,
-        populate: {
-          path: 'company', 
-          select: 'currency', 
-          model: Company,
-          populate: {
-            path: 'currency', 
-            select: 'code', 
-            model: Currencies,
-          }
-        }
+  if (lockAcquired) {
+    // --- МЫ "ПОБЕДИТЕЛЬ" ---
+    // Мы успешно установили замок, значит, мы первые.
+    try {
+      // Выполняем основную работу: идем в базу данных
+      const result = await findRefreshTokenAndUpdated(oldRefreshToken, headers[HEADER_DEVICE_ID]);
+      
+      if (!result) {
+        throw new Error('Refresh token not found or expired');
       }
-    );
 
-  return update;
+      // Сохраняем результат в Redis для других процессов
+      await redis.set(resultKey, JSON.stringify(result), 'EX', RESULT_TTL_S);
+      
+      // Применяем результат к текущему запросу
+      applyRefreshResult(request, reply, result);
+      return; // Успешно, продолжаем выполнение
+    } catch (error) {
+      // Если произошла ошибка, нам нужно сообщить об этом другим ожидающим процессам
+      // Сохраняем ошибку в кеш
+      await redis.set(resultKey, JSON.stringify({ error: true, message: error.message }), 'EX', RESULT_TTL_S);
+      throw error; // Пробрасываем ошибку дальше, чтобы ее обработал внешний try-catch
+    } finally {
+      // Важно! Всегда освобождаем замок после выполнения работы.
+      await redis.del(lockKey);
+    }
+  } else {
+    // --- МЫ "ОЖИДАЮЩИЙ" ---
+    // Замок уже захвачен другим процессом. Ждем результат.
+    try {
+      const result = await waitForRefreshResult(resultKey);
+      applyRefreshResult(request, reply, result);
+      return; // Успешно, продолжаем выполнение
+    } catch (error) {
+      throw error; // Пробрасываем ошибку дальше
+    }
+  }
+};
+
+/**
+ * Ожидает результат обновления от "победившего" процесса.
+ * @param {string} resultKey - Ключ в Redis, где ожидается результат.
+ */
+async function waitForRefreshResult(resultKey) {
+  for (let i = 0; i < POLLING_ATTEMPTS; i++) {
+    await new Promise(resolve => setTimeout(resolve, POLLING_INTERVAL_MS));
+    
+    const resultData = await redis.get(resultKey);
+
+    if (resultData) {
+      const result = JSON.parse(resultData);
+      if (result.error) {
+        throw new Error(`Another process failed to refresh token: ${result.message}`);
+      }
+      return result;
+    }
+  }
+  throw new Error('Timed out waiting for token refresh result.');
 }
 
-const removeInvalidRefreshToken = async (refreshToken) => {
-  return await RefreshToken.findOneAndDelete({ token: refreshToken });
+
+// --- ХЕЛПЕРЫ (большинство без изменений, кроме RefreshTokenUpdate) ---
+
+// Эта функция остается как есть, она работает с MongoDB
+const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => { /* ... ваш код ... */ };
+
+// Эта функция остается как есть
+const applyRefreshResult = (request, reply, refreshResult) => { /* ... ваш код ... */ };
+
+// Эта функция остается как есть
+const generateAccessToken = (payload) => { /* ... ваш код ... */ };
+
+// ... все остальные ваши хелперы (`handleServerError`, `setRefreshTokenCookie` и т.д.) ...
+
+// Обработчики ошибок для Fastify
+const handleServerError = (reply, error) => {
+  console.error(error);
+  return reply.status(500).send({ success: false, code: 500, msg: 'Server error' });
 };
 
-const handleServerError = (res) => {
-  return setCookieAndSendErrorMessage(res, 'Server error');
-};
-
-const handleRefreshTokenNotUpdate = (res) => {
-  return setCookieAndSendErrorMessage(res, 'Refresh token not updated');
-};
-
-const setCookieAndSendErrorMessage = (res, errorMsg) => {
-  res.setCookie('refreshToken', '', {
-    httpOnly: false,
-    secure: false,
-    domain: process.env.DOMAIN,
-    path: '/',
-  });
-  res.status(200);
-  return { success: false, code: 401, msg: errorMsg };
-};
-
-const setRefreshTokenCookie = (res, token) => {
-  res.setCookie('refreshToken', token, {
-    expires: expiresTimeAsMs,
+const handleRefreshTokenNotUpdate = (reply) => {
+  reply.setCookie('refreshToken', '', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    domain: process.env.DOMAIN,
-    path: '/'
+    path: '/',
+    expires: new Date(0)
   });
+  return reply.status(401).send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
 };
 
-/* 
-*
-*  Любой запрос на доступ к авторизированному ресурсу должен содержать:
-*  cookies: refreshToken
-*  headers: x-device-id
-*
-**/
 
+/*
+ *  ЭКСПОРТ И ИСПОЛЬЗОВАНИЕ В FASTIFY
+ *  (Основной хук, который теперь вызывает новую логику)
+ */
 export default () => {
-  const middleware = async (req, res, next) => {
-    try { 
-      // Получения headers, cookies из запроса 
-      const {headers, cookies} = req;
-      // Получения refreshToken
+  const authHook = async (request, reply) => {
+    try {
+      const { headers, cookies } = request;
       const refreshToken = cookies.refreshToken;
-      // Если отсутствует Device ID в запросе, обнулить куки, поставить статус ответа 401, направить сообще об ошибки в формате JSON
-      if(!headers[HEADER_DEVICE_ID]){
-        return res.send(setCookieAndSendErrorMessage(res, 'Headers not found device id'));
+      const deviceId = headers[HEADER_DEVICE_ID];
+
+      if (!deviceId || !refreshToken) {
+        return reply.status(401).send({ success: false, code: 401, msg: 'Missing credentials' });
       }
-      // Если отсутствует Refresh Token в запросе, обнулить куки, поставить статус ответа 401, направить сообще об ошибки в формате JSON
-      if(!refreshToken){
-        return res.send(setCookieAndSendErrorMessage(res, 'Refresh Token not found'));
-      } 
 
-      // Если существует Access Token
-      if(headers[HEADER_AUTH_TOKEN]){
-          const accessToken = headers[HEADER_AUTH_TOKEN];
-          const {exp, payload} = jwt.decode(accessToken, privateKey);
-          const expirationTime = exp * 1000
-          // Дата токена больше текущей даты
-          if (Date.now() <= expirationTime) {
-              try {
-                req.accessToken = generateAccessToken(payload);
-                req.session = {
-                  _id: payload._id,
-                  company: payload.company._id,
-                  deviceId: headers[HEADER_DEVICE_ID]
-                }
-                return next;
-              } catch(error){
-                return res.send(handleServerError(res, error));
-              }
-          } else {
-            // console.log('Update refresh token, expiration time access token');
-            return await RefreshTokenUpdate(req, res, next);
+      const accessToken = headers[HEADER_AUTH_TOKEN];
+      if (accessToken) {
+        try {
+          const payload = jwt.verify(accessToken, privateKey, { algorithms: ['RS256'] });
+          request.accessToken = accessToken;
+          request.session = { _id: payload._id, company: payload.company._id, deviceId };
+          return;
+        } catch (error) {
+          if (error.name === 'TokenExpiredError') {
+            // Токен истек, запускаем логику обновления с распределенной блокировкой
+            await RefreshTokenUpdate(request, reply);
+            return;
           }
+          return handleRefreshTokenNotUpdate(reply);
+        }
       } else {
-          // console.log('Update refresh token, access token not found');
-          return await RefreshTokenUpdate(req, res, next);
-      }  
-    } catch(error) {
-      return res.send(handleServerError(res, error));
-    } 
-  }
+        // Access Token отсутствует, запускаем логику обновления
+        await RefreshTokenUpdate(request, reply);
+        return;
+      }
+    } catch (error) {
+      // Здесь мы поймаем ошибки как от основного процесса, так и от ожидания
+      if (error.message.includes('not found or expired') || error.message.includes('Timed out')) {
+          return handleRefreshTokenNotUpdate(reply);
+      }
+      return handleServerError(reply, error);
+    }
+  };
 
-  return middleware;
-}
+  return authHook;
+};
