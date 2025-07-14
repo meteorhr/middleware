@@ -33,12 +33,12 @@ const config = {
   refreshTokenLifetimeDays: 60,
 };
 
-// --- ИСПРАВЛЕНО: Надежное определение пути к ключу ---
+// --- УЛУЧШЕНО: Надежное определение пути к ключу ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const privateKey = fs.readFileSync(path.resolve(__dirname, config.jwt.privateKeyPath), 'utf8');
 
-// --- ИСПРАВЛЕНО: Кастомные классы ошибок ---
+// --- УЛУЧШЕНО: Кастомные классы ошибок ---
 class TokenRefreshFailedError extends Error {
   constructor(message) { super(message); this.name = 'TokenRefreshFailedError'; }
 }
@@ -49,9 +49,10 @@ class TokenRefreshTimeoutError extends Error {
 /**
  * Основная функция обновления токена, использующая распределенную блокировку Redis.
  */
-const RefreshTokenUpdate = async (request, reply) => {
-  const { headers, cookies } = request;
+const RefreshTokenUpdate = async (req, res) => {
+  const { headers, cookies } = req;
   const oldRefreshToken = cookies[config.cookies.refreshTokenName];
+  const deviceId = headers[config.headers.deviceId];
 
   const lockKey = `lock:refresh:${oldRefreshToken}`;
   const resultKey = `result:refresh:${oldRefreshToken}`;
@@ -61,16 +62,13 @@ const RefreshTokenUpdate = async (request, reply) => {
   if (lockAcquired) {
     // --- ПОБЕДИТЕЛЬ ---
     try {
-      const result = await findRefreshTokenAndUpdated(oldRefreshToken, headers[config.headers.deviceId]);
-      
+      const result = await findRefreshTokenAndUpdated(oldRefreshToken, deviceId);
       if (!result) {
         await removeInvalidRefreshToken(oldRefreshToken);
         throw new TokenRefreshFailedError('Refresh token not found or expired');
       }
-
       await redis.set(resultKey, JSON.stringify(result), 'EX', config.redis.resultTtlS);
-      applyRefreshResult(request, reply, result);
-
+      applyRefreshResult(req, res, result);
     } catch (error) {
       await redis.set(resultKey, JSON.stringify({ error: true, message: error.message }), 'EX', config.redis.resultTtlS);
       throw error;
@@ -80,7 +78,7 @@ const RefreshTokenUpdate = async (request, reply) => {
   } else {
     // --- ОЖИДАЮЩИЙ ---
     const result = await waitForRefreshResult(resultKey);
-    applyRefreshResult(request, reply, result);
+    applyRefreshResult(req, res, result);
   }
 };
 
@@ -90,7 +88,6 @@ const RefreshTokenUpdate = async (request, reply) => {
 async function waitForRefreshResult(resultKey) {
   for (let i = 0; i < config.redis.pollingAttempts; i++) {
     await new Promise(resolve => setTimeout(resolve, config.redis.pollingIntervalMs));
-    
     const resultData = await redis.get(resultKey);
     if (resultData) {
       const result = JSON.parse(resultData);
@@ -115,32 +112,24 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
       path: 'userId', 
       select: 'email phone telegram notification roles active name avatar company', 
       model: User,
-      populate: {
-        path: 'company', 
-        select: 'currency', 
-        model: Company,
-        populate: {
-          path: 'currency', 
-          select: 'code', 
-          model: Currencies,
-        }
+      populate: { path: 'company', select: 'currency', model: Company,
+        populate: { path: 'currency', select: 'code', model: Currencies }
       }
     });
 };
 
-const applyRefreshResult = (request, reply, refreshResult) => {
+const applyRefreshResult = (req, res, refreshResult) => {
   const { userId, token: newRefreshToken } = refreshResult;
-  
-  request.accessToken = generateAccessToken(userId);
-  request.session = {
+  req.accessToken = generateAccessToken(userId);
+  req.session = {
     _id: userId._id,
-    company: userId.company._id,
-    deviceId: request.headers[config.headers.deviceId]
+    company: userId.company?._id,
+    deviceId: req.headers[config.headers.deviceId]
   };
-  
-  setRefreshTokenCookie(reply, newRefreshToken);
+  setRefreshTokenCookie(res, newRefreshToken);
 };
 
+// ИСПРАВЛЕНО: Пейлоад не оборачивается в лишний объект
 const generateAccessToken = (payload) => {
   return jwt.sign(payload, privateKey, {
     expiresIn: `${config.jwt.expiresIn}m`,
@@ -156,80 +145,84 @@ const removeInvalidRefreshToken = async (refreshToken) => {
   }
 };
 
-const setRefreshTokenCookie = (reply, token) => {
+// ИСПРАВЛЕНО: Безопасная установка cookie
+const setRefreshTokenCookie = (res, token) => {
   const expiresTime = new Date(Date.now() + (1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays));
-  reply.setCookie(config.cookies.refreshTokenName, token, {
+  res.cookie(config.cookies.refreshTokenName, token, {
     expires: expiresTime,
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true, // КРАЙНЕ ВАЖНО для безопасности
+    secure: process.env.NODE_ENV === 'production', // КРАЙНЕ ВАЖНО для безопасности
     domain: process.env.DOMAIN,
     path: '/'
   });
 };
 
-const handleServerError = (reply, error) => {
+// ИСПРАВЛЕНО: Корректные обработчики ошибок
+const handleServerError = (res, error) => {
   console.error('Unhandled Authentication Error:', error);
-  return reply.status(500).send({ success: false, code: 500, msg: 'Internal Server Error' });
+  res.status(500).send({ success: false, code: 500, msg: 'Internal Server Error' });
 };
 
-const handleRefreshTokenNotUpdate = (reply) => {
-  reply.setCookie(config.cookies.refreshTokenName, '', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+const handleAuthFailure = (res) => {
+  res.clearCookie(config.cookies.refreshTokenName, {
     domain: process.env.DOMAIN,
-    path: '/',
-    expires: new Date(0)
+    path: '/'
   });
-  return reply.status(401).send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
+  res.status(401).send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
 };
 
 /**
- * Главный хук аутентификации для Fastify
+ * Главный middleware для Express.js
  */
 export default () => {
-  const authHook = async (request, reply) => {
+  const middleware = async (req, res, next) => {
     
     // Внутренняя функция для вызова логики обновления и обработки ее специфичных ошибок
     const performTokenRefresh = async () => {
       try {
-        await RefreshTokenUpdate(request, reply);
+        await RefreshTokenUpdate(req, res);
+        next(); // Успешно обновили, продолжаем
       } catch (error) {
         if (error instanceof TokenRefreshFailedError || error instanceof TokenRefreshTimeoutError) {
-          // Эти ошибки означают, что сессия невалидна
-          return handleRefreshTokenNotUpdate(reply);
+          handleAuthFailure(res); // Сессия невалидна, отправляем 401
+        } else {
+          handleServerError(res, error); // Непредвиденная ошибка, отправляем 500
         }
-        // Все остальные непредвиденные ошибки (например, сбой Redis)
-        return handleServerError(reply, error);
       }
     };
 
-    const { headers, cookies } = request;
+    const { headers, cookies } = req;
     const refreshToken = cookies[config.cookies.refreshTokenName];
     const deviceId = headers[config.headers.deviceId];
 
     if (!deviceId || !refreshToken) {
-      return reply.status(401).send({ success: false, code: 401, msg: 'Missing credentials' });
+      return handleAuthFailure(res);
     }
 
     const accessToken = headers[config.headers.authToken];
     if (accessToken) {
       try {
+        // ИСПРАВЛЕНО: Используем jwt.verify для безопасности
         const payload = jwt.verify(accessToken, privateKey, { algorithms: ['RS256'] });
-        request.accessToken = accessToken;
-        request.session = { _id: payload._id, company: payload.company?._id, deviceId }; // Добавлена проверка company
-        return; // Токен валиден, продолжаем
+        
+        // Токен валиден, не нужно его пересоздавать
+        req.accessToken = accessToken;
+        req.session = { _id: payload._id, company: payload.company?._id, deviceId };
+        
+        return next(); // Продолжаем выполнение
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
+          // Access token истек, запускаем обновление
           return await performTokenRefresh();
         }
-        // Неверный accessToken (плохая подпись, неверный формат и т.д.) - прекращаем сессию
-        return handleRefreshTokenNotUpdate(reply);
+        // Любая другая ошибка (неверная подпись и т.д.) - сессия невалидна
+        return handleAuthFailure(res);
       }
     } else {
-      // Access token отсутствует
+      // Access token отсутствует, запускаем обновление
       return await performTokenRefresh();
     }
   };
 
-  return authHook;
+  return middleware;
 };
