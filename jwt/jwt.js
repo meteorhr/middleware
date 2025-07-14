@@ -104,22 +104,27 @@ async function waitForRefreshResult(resultKey) {
 
 const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
   const currentDate = new Date();
+  const oldTokenDoc = await RefreshToken.findOneAndDelete({ 
+    token: refreshToken, 
+    deviceId, 
+    expired_at: { $gte: currentDate } 
+  }).lean().populate({ /* ... ваш populate ... */ });
+
+  if (!oldTokenDoc) {
+    return null;
+  }
+
   const expiredDate = new Date(currentDate.getTime() + (1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays));
+  const newRefreshToken = new RefreshToken({
+    token: uuidv4(),
+    userId: oldTokenDoc.userId._id,
+    deviceId: deviceId,
+    expired_at: expiredDate,
+  });
+  await newRefreshToken.save();
 
-  return RefreshToken.findOneAndUpdate(
-    { token: refreshToken, deviceId, expired_at: { $gte: currentDate } },
-    { $set: { token: uuidv4(), updated_at: currentDate, expired_at: expiredDate } },
-    { new: true, lean: true, fields: { token: 1, userId: 1 } }
-  ).populate({ 
-      path: 'userId', 
-      select: 'email phone telegram notification roles active name avatar company', 
-      model: User,
-      populate: { path: 'company', select: 'currency', model: Company,
-        populate: { path: 'currency', select: 'code', model: Currencies }
-      }
-    });
+  return { userId: oldTokenDoc.userId, token: newRefreshToken.token };
 };
-
 
 const applyRefreshResult = (req, res, refreshResult) => {
   const { userId, token: newRefreshToken } = refreshResult;
@@ -155,7 +160,7 @@ const setRefreshTokenCookie = (res, token) => {
     expires: expiresTime,
     httpOnly: true, // КРАЙНЕ ВАЖНО для безопасности
     secure: process.env.NODE_ENV === 'production', // КРАЙНЕ ВАЖНО для безопасности
-    //sameSite: 'Lax',  // Защита от CSRF. Можно использовать 'Strict' для большей безопасности.
+    sameSite: 'Lax',  // Защита от CSRF. Можно использовать 'Strict' для большей безопасности.
     domain: process.env.DOMAIN,
     path: '/'
   });
@@ -175,63 +180,68 @@ const handleAuthFailure = (res) => {
   res.status(401).send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
 };
 
+
 /**
- * Главный middleware для Express.js
+ * Главный хук аутентификации для Fastify
  */
 export default () => {
-  const middleware = async (req, res, next) => {
+  const authHook = async (request, reply) => {
     
     // Внутренняя функция для вызова логики обновления и обработки ее специфичных ошибок
     const performTokenRefresh = async () => {
       try {
-        await RefreshTokenUpdate(req, res);
-        next; // Успешно обновили, продолжаем
+        await RefreshTokenUpdate(request, reply);
+        // Если RefreshTokenUpdate завершился успешно, он уже добавил
+        // в request.session все что нужно. Нам не нужно ничего возвращать,
+        // просто позволяем функции завершиться, и Fastify пойдет дальше.
+        return;
       } catch (error) {
         if (error instanceof TokenRefreshFailedError || error instanceof TokenRefreshTimeoutError) {
-          handleAuthFailure(res); // Сессия невалидна, отправляем 401
-        } else {
-          handleServerError(res, error); // Непредвиденная ошибка, отправляем 500
+          // ИСПРАВЛЕНО: Прерываем выполнение, отправляя ответ
+          return handleAuthFailure(reply);
         }
+        // ИСПРАВЛЕНО: Прерываем выполнение, отправляя ответ
+        return handleServerError(reply, error);
       }
     };
 
-    const { headers, cookies } = req;
+    const { headers, cookies } = request;
     const refreshToken = cookies[config.cookies.refreshTokenName];
     const deviceId = headers[config.headers.deviceId];
 
     if (!deviceId || !refreshToken) {
-      return handleAuthFailure(res);
+      // ИСПРАВЛЕНО: Прерываем выполнение, отправляя ответ
+      return handleAuthFailure(reply);
     }
 
     const accessToken = headers[config.headers.authToken];
     if (accessToken) {
       try {
-        // ИСПРАВЛЕНО: Используем jwt.verify для безопасности
         const payloadFromToken = jwt.verify(accessToken, privateKey, { algorithms: ['RS256'] });
         const payload = payloadFromToken.payload ? payloadFromToken.payload : payloadFromToken;
         
-        // Токен валиден, не нужно его пересоздавать
-        req.accessToken = accessToken;
-        req.session = req.session = { 
+        request.accessToken = accessToken;
+        request.session = { 
           _id: payload._id, 
           company: payload.company?._id, 
           deviceId 
         };
         
-        return next; // Продолжаем выполнение
+        // ИСПРАВЛЕНО: Ничего не возвращаем. Просто завершаем функцию, чтобы Fastify пошел дальше.
+        return; 
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
-          // Access token истек, запускаем обновление
+          // ИСПРАВЛЕНО: Вызываем и ЖДЕМ завершения, возвращая результат (который будет либо undefined, либо reply)
           return await performTokenRefresh();
         }
-        // Любая другая ошибка (неверная подпись и т.д.) - сессия невалидна
-        return handleAuthFailure(res);
+        // ИСПРАВЛЕНО: Прерываем выполнение, отправляя ответ
+        return handleAuthFailure(reply);
       }
     } else {
-      // Access token отсутствует, запускаем обновление
+      // ИСПРАВЛЕНО: Вызываем и ЖДЕМ завершения, возвращая результат
       return await performTokenRefresh();
     }
   };
 
-  return middleware;
+  return authHook;
 };
