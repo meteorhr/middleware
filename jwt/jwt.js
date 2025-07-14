@@ -234,9 +234,7 @@ export default () => {
       try {
         // ИСПРАВЛЕНО: Используем jwt.verify для безопасности
         const payloadFromToken = jwt.verify(accessToken, privateKey, { algorithms: ['RS256'] });
-        console.log(payloadFromToken)
         const payload = payloadFromToken.payload ? payloadFromToken.payload : payloadFromToken;
-        console.log(payload)
         
         // Токен валиден, не нужно его пересоздавать
         req.accessToken = accessToken;
