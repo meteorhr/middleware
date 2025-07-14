@@ -104,14 +104,13 @@ async function waitForRefreshResult(resultKey) {
 
 const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
   const currentDate = new Date();
-  
-  // Шаг 1: Атомарно найти и удалить старый токен.
-  // Если он найден, значит он был валидным. Если нет, значит токен неверный.
-  const oldTokenDoc = await RefreshToken.findOneAndDelete({ 
-    token: refreshToken, 
-    deviceId, 
-    expired_at: { $gte: currentDate } 
-  }).populate({ 
+  const expiredDate = new Date(currentDate.getTime() + (1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays));
+
+  return RefreshToken.findOneAndUpdate(
+    { token: refreshToken, deviceId, expired_at: { $gte: currentDate } },
+    { $set: { token: uuidv4(), updated_at: currentDate, expired_at: expiredDate } },
+    { new: true, lean: true, fields: { token: 1, userId: 1 } }
+  ).populate({ 
       path: 'userId', 
       select: 'email phone telegram notification roles active name avatar company', 
       model: User,
@@ -119,31 +118,6 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
         populate: { path: 'currency', select: 'code', model: Currencies }
       }
     });
-
-  // Если токен не найден, он невалиден.
-  if (!oldTokenDoc) {
-    // ВАЖНО: Здесь можно добавить логику обнаружения кражи.
-    // Если кто-то пытается использовать старый токен, нужно аннулировать все сессии пользователя.
-    // const stolenToken = await RefreshToken.findOne({ token: refreshToken });
-    // if (stolenToken) { /* invalidateAllSessionsForUser(stolenToken.userId) */ }
-    return null;
-  }
-
-  // Шаг 2: Создать новый refresh-токен с новым UUID и сроком жизни.
-  const expiredDate = new Date(currentDate.getTime() + (1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays));
-  const newRefreshToken = new RefreshToken({
-    token: uuidv4(),
-    userId: oldTokenDoc.userId._id,
-    deviceId: deviceId,
-    expired_at: expiredDate,
-  });
-  await newRefreshToken.save();
-
-  // Возвращаем данные старого токена (для userId) и токен нового
-  return {
-    userId: oldTokenDoc.userId,
-    token: newRefreshToken.token,
-  };
 };
 
 
