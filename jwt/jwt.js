@@ -131,7 +131,7 @@ const applyRefreshResult = (req, res, refreshResult) => {
 
 // ИСПРАВЛЕНО: Пейлоад не оборачивается в лишний объект
 const generateAccessToken = (payload) => {
-  return jwt.sign(payload, privateKey, {
+  return jwt.sign({ payload }, privateKey, {
     expiresIn: `${config.jwt.expiresIn}m`,
     algorithm: 'RS256'
   });
@@ -181,7 +181,7 @@ export default () => {
     const performTokenRefresh = async () => {
       try {
         await RefreshTokenUpdate(req, res);
-        next(); // Успешно обновили, продолжаем
+        next; // Успешно обновили, продолжаем
       } catch (error) {
         if (error instanceof TokenRefreshFailedError || error instanceof TokenRefreshTimeoutError) {
           handleAuthFailure(res); // Сессия невалидна, отправляем 401
@@ -209,7 +209,7 @@ export default () => {
         req.accessToken = accessToken;
         req.session = { _id: payload._id, company: payload.company?._id, deviceId };
         
-        return next(); // Продолжаем выполнение
+        return next; // Продолжаем выполнение
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
           // Access token истек, запускаем обновление
