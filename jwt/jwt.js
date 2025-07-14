@@ -131,7 +131,7 @@ const applyRefreshResult = (req, res, refreshResult) => {
 
 // ИСПРАВЛЕНО: Пейлоад не оборачивается в лишний объект
 const generateAccessToken = (payload) => {
-  return jwt.sign({ payload }, privateKey, {
+  return jwt.sign(payload, privateKey, {
     expiresIn: `${config.jwt.expiresIn}m`,
     algorithm: 'RS256'
   });
@@ -203,11 +203,18 @@ export default () => {
     if (accessToken) {
       try {
         // ИСПРАВЛЕНО: Используем jwt.verify для безопасности
-        const payload = jwt.verify(accessToken, privateKey, { algorithms: ['RS256'] });
+        const payloadFromToken = jwt.verify(accessToken, privateKey, { algorithms: ['RS256'] });
+        console.log(payloadFromToken)
+        const payload = payloadFromToken.payload ? payloadFromToken.payload : payloadFromToken;
+        console.log(payload)
         
         // Токен валиден, не нужно его пересоздавать
         req.accessToken = accessToken;
-        req.session = { _id: payload._id, company: payload.company?._id, deviceId };
+        req.session = req.session = { 
+          _id: payload._id, 
+          company: payload.company?._id, 
+          deviceId 
+        };
         
         return next; // Продолжаем выполнение
       } catch (error) {
