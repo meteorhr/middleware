@@ -49,8 +49,8 @@ class TokenRefreshTimeoutError extends Error {
 /**
  * Основная функция обновления токена, использующая распределенную блокировку Redis.
  */
-const RefreshTokenUpdate = async (req, res) => {
-  const { headers, cookies } = req;
+const RefreshTokenUpdate = async (request, reply) => {
+  const { headers, cookies } = request;
   const oldRefreshToken = cookies[config.cookies.refreshTokenName];
   const deviceId = headers[config.headers.deviceId];
 
@@ -64,11 +64,11 @@ const RefreshTokenUpdate = async (req, res) => {
     try {
       const result = await findRefreshTokenAndUpdated(oldRefreshToken, deviceId);
       if (!result) {
-        await removeInvalidRefreshToken(oldRefreshToken);
-        throw new TokenRefreshFailedError('Refresh token not found or expired');
+        // Мы не вызываем removeInvalidRefreshToken, т.к. findOneAndDelete уже сделал это
+        throw new TokenRefreshFailedError('Refresh token not found, expired, or already used');
       }
       await redis.set(resultKey, JSON.stringify(result), 'EX', config.redis.resultTtlS);
-      applyRefreshResult(req, res, result);
+      applyRefreshResult(request, reply, result);
     } catch (error) {
       await redis.set(resultKey, JSON.stringify({ error: true, message: error.message }), 'EX', config.redis.resultTtlS);
       throw error;
@@ -78,7 +78,7 @@ const RefreshTokenUpdate = async (req, res) => {
   } else {
     // --- ОЖИДАЮЩИЙ ---
     const result = await waitForRefreshResult(resultKey);
-    applyRefreshResult(req, res, result);
+    applyRefreshResult(request, reply, result);
   }
 };
 
@@ -104,37 +104,74 @@ async function waitForRefreshResult(resultKey) {
 
 const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
   const currentDate = new Date();
+  
+  // Шаг 1: Атомарно найти и удалить старый токен.
+  // Populate выполняется на уровне самого запроса, а не в цепочке после него.
   const oldTokenDoc = await RefreshToken.findOneAndDelete({ 
     token: refreshToken, 
     deviceId, 
     expired_at: { $gte: currentDate } 
-  }).lean().populate({ /* ... ваш populate ... */ });
+  }).populate({ 
+      path: 'userId', 
+      select: 'email phone telegram notification roles active name avatar company', 
+      model: User,
+      populate: { path: 'company', select: 'currency', model: Company,
+        populate: { path: 'currency', select: 'code', model: Currencies }
+      }
+    });
 
+  // Если токен не найден или просрочен, oldTokenDoc будет null.
   if (!oldTokenDoc) {
+    // Добавим диагностику для поиска причины
+    console.error(`[Auth] Refresh token rotation failed. Token not found or expired. Token: ${refreshToken}, DeviceID: ${deviceId}`);
+    // Можно добавить логику для обнаружения кражи токена здесь.
     return null;
   }
+  
+  // Если oldTokenDoc есть, но userId не был найден (например, удален), это тоже ошибка.
+  if (!oldTokenDoc.userId) {
+      console.error(`[Auth] Orphaned refresh token found and deleted. Token: ${refreshToken}`);
+      return null;
+  }
 
+  // Шаг 2: Создать новый refresh-токен.
   const expiredDate = new Date(currentDate.getTime() + (1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays));
   const newRefreshToken = new RefreshToken({
     token: uuidv4(),
-    userId: oldTokenDoc.userId._id,
+    userId: oldTokenDoc.userId._id, // userId здесь - это полный объект User
     deviceId: deviceId,
     expired_at: expiredDate,
   });
   await newRefreshToken.save();
 
-  return { userId: oldTokenDoc.userId, token: newRefreshToken.token };
+  // Возвращаем полный объект пользователя и новый токен.
+  return { 
+    userId: oldTokenDoc.userId.toObject(), // Преобразуем Mongoose документ в plain object
+    token: newRefreshToken.token 
+  };
 };
 
-const applyRefreshResult = (req, res, refreshResult) => {
+const applyRefreshResult = (request, reply, refreshResult) => {
   const { userId, token: newRefreshToken } = refreshResult;
-  req.accessToken = generateAccessToken(userId);
-  req.session = {
+  request.accessToken = generateAccessToken(userId);
+  request.session = {
     _id: userId._id,
     company: userId.company?._id,
-    deviceId: req.headers[config.headers.deviceId]
+    deviceId: request.headers[config.headers.deviceId]
   };
-  setRefreshTokenCookie(res, newRefreshToken);
+  setRefreshTokenCookie(reply, newRefreshToken);
+};
+
+const setRefreshTokenCookie = (reply, token) => {
+  const expiresTime = new Date(Date.now() + (1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays));
+  reply.setCookie(config.cookies.refreshTokenName, token, {
+    expires: expiresTime,
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'Lax',
+    domain: process.env.DOMAIN,
+    path: '/'
+  });
 };
 
 // ИСПРАВЛЕНО: Пейлоад не оборачивается в лишний объект
@@ -153,18 +190,7 @@ const removeInvalidRefreshToken = async (refreshToken) => {
   }
 };
 
-// ИСПРАВЛЕНО: Безопасная установка cookie
-const setRefreshTokenCookie = (res, token) => {
-  const expiresTime = new Date(Date.now() + (1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays));
-  res.cookie(config.cookies.refreshTokenName, token, {
-    expires: expiresTime,
-    httpOnly: true, // КРАЙНЕ ВАЖНО для безопасности
-    secure: process.env.NODE_ENV === 'production', // КРАЙНЕ ВАЖНО для безопасности
-    sameSite: 'Lax',  // Защита от CSRF. Можно использовать 'Strict' для большей безопасности.
-    domain: process.env.DOMAIN,
-    path: '/'
-  });
-};
+
 
 // ИСПРАВЛЕНО: Корректные обработчики ошибок
 const handleServerError = (res, error) => {
@@ -187,20 +213,14 @@ const handleAuthFailure = (res) => {
 export default () => {
   const authHook = async (request, reply) => {
     
-    // Внутренняя функция для вызова логики обновления и обработки ее специфичных ошибок
     const performTokenRefresh = async () => {
       try {
         await RefreshTokenUpdate(request, reply);
-        // Если RefreshTokenUpdate завершился успешно, он уже добавил
-        // в request.session все что нужно. Нам не нужно ничего возвращать,
-        // просто позволяем функции завершиться, и Fastify пойдет дальше.
-        return;
+        return; // Успешно обновили, продолжаем
       } catch (error) {
         if (error instanceof TokenRefreshFailedError || error instanceof TokenRefreshTimeoutError) {
-          // ИСПРАВЛЕНО: Прерываем выполнение, отправляя ответ
           return handleAuthFailure(reply);
         }
-        // ИСПРАВЛЕНО: Прерываем выполнение, отправляя ответ
         return handleServerError(reply, error);
       }
     };
@@ -210,7 +230,6 @@ export default () => {
     const deviceId = headers[config.headers.deviceId];
 
     if (!deviceId || !refreshToken) {
-      // ИСПРАВЛЕНО: Прерываем выполнение, отправляя ответ
       return handleAuthFailure(reply);
     }
 
@@ -227,18 +246,14 @@ export default () => {
           deviceId 
         };
         
-        // ИСПРАВЛЕНО: Ничего не возвращаем. Просто завершаем функцию, чтобы Fastify пошел дальше.
-        return; 
+        return; // Токен валиден, продолжаем
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
-          // ИСПРАВЛЕНО: Вызываем и ЖДЕМ завершения, возвращая результат (который будет либо undefined, либо reply)
           return await performTokenRefresh();
         }
-        // ИСПРАВЛЕНО: Прерываем выполнение, отправляя ответ
         return handleAuthFailure(reply);
       }
     } else {
-      // ИСПРАВЛЕНО: Вызываем и ЖДЕМ завершения, возвращая результат
       return await performTokenRefresh();
     }
   };
