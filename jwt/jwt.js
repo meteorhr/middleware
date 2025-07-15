@@ -193,17 +193,17 @@ const removeInvalidRefreshToken = async (refreshToken) => {
 
 
 // ИСПРАВЛЕНО: Корректные обработчики ошибок
-const handleServerError = (res, error) => {
+const handleServerError = ((reply, error) => {
   console.error('Unhandled Authentication Error:', error);
-  res.status(500).send({ success: false, code: 500, msg: 'Internal Server Error' });
+   return reply.status(500).send({ success: false, code: 500, msg: 'Internal Server Error' });
 };
 
-const handleAuthFailure = (res) => {
-  res.clearCookie(config.cookies.refreshTokenName, {
+const handleAuthFailure = (reply) => {
+  reply.clearCookie(config.cookies.refreshTokenName, {
     domain: process.env.DOMAIN,
     path: '/'
   });
-  res.status(401).send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
+  return reply.status(401).send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
 };
 
 
@@ -219,7 +219,7 @@ export default () => {
         return; // Успешно обновили, продолжаем
       } catch (error) {
         if (error instanceof TokenRefreshFailedError || error instanceof TokenRefreshTimeoutError) {
-          return handleAuthFailure(reply);
+            return handleAuthFailure(reply);
         }
         return handleServerError(reply, error);
       }
@@ -230,7 +230,7 @@ export default () => {
     const deviceId = headers[config.headers.deviceId];
 
     if (!deviceId || !refreshToken) {
-      return handleAuthFailure(reply);
+     return handleAuthFailure(reply);
     }
 
     const accessToken = headers[config.headers.authToken];
@@ -249,12 +249,12 @@ export default () => {
         return; // Токен валиден, продолжаем
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
-          return await performTokenRefresh();
+         return performTokenRefresh();
         }
         return handleAuthFailure(reply);
       }
     } else {
-      return await performTokenRefresh();
+       return performTokenRefresh();
     }
   };
 
