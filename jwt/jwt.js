@@ -192,16 +192,16 @@ const removeInvalidRefreshToken = async (refreshToken) => {
 
 
 
-// ИСПРАВЛЕНО: Корректные обработчики ошибок
-const handleServerError = ((reply, error) => {
+const handleServerError = (reply, error) => {
   console.error('Unhandled Authentication Error:', error);
-   return reply.status(500).send({ success: false, code: 500, msg: 'Internal Server Error' });
+  return reply.status(500).send({ success: false, code: 500, msg: 'Internal Server Error' });
 };
 
 const handleAuthFailure = (reply) => {
-  reply.clearCookie(config.cookies.refreshTokenName, {
+  reply.setCookie(config.cookies.refreshTokenName, '', {
     domain: process.env.DOMAIN,
-    path: '/'
+    path: '/',
+    expires: new Date(0)
   });
   return reply.status(401).send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
 };
@@ -216,7 +216,7 @@ export default () => {
     const performTokenRefresh = async () => {
       try {
         await RefreshTokenUpdate(request, reply);
-        return; // Успешно обновили, продолжаем
+        return; 
       } catch (error) {
         if (error instanceof TokenRefreshFailedError || error instanceof TokenRefreshTimeoutError) {
             return handleAuthFailure(reply);
