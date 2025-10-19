@@ -82,6 +82,80 @@ const RefreshTokenUpdate = async (request, reply) => {
   }
 };
 
+// ----- ДОБАВИТЬ: утилиты для анализа Origin/хоста -----
+function getHostnameFromRequest(request) {
+  // Предпочитаем Origin (когда запрос к API идёт с фронта через CORS)
+  const origin = request.headers.origin;
+  if (origin) {
+    try {
+      return new URL(origin).hostname.toLowerCase();
+    } catch {}
+  }
+  // Fallback на host заголовок/fastify hostname
+  const hostHdr = request.headers['x-forwarded-host'] || request.headers.host;
+  if (hostHdr) {
+    // hostHdr может содержать порт
+    return hostHdr.split(':')[0].toLowerCase();
+  }
+  if (request.hostname) return String(request.hostname).toLowerCase();
+  return '';
+}
+
+function computeCookieOptionsByHost(hostname, expiresTime) {
+  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+  const isMeteor = hostname.endsWith('.meteorhr.com') || hostname === 'meteorhr.com';
+  const isCloudworkstations = hostname.endsWith('.cloudworkstations.dev') || hostname === 'cloudworkstations.dev';
+
+  // Базовые опции
+  const base = {
+    httpOnly: true,
+    path: '/',
+    expires: expiresTime,
+  };
+
+  // ЛОКАЛЬНАЯ РАЗРАБОТКА
+  if (isLocalhost || hostname === '') {
+    // host-only cookie (НЕ указываем domain), без Secure
+    return {
+      ...base,
+      secure: false,
+      sameSite: 'Lax', // фронт и API обычно «односайтовые» при локалке
+      // domain: НЕ УКАЗЫВАЕМ для localhost
+    };
+  }
+
+  // PROD / TEST c HTTPS
+  // По умолчанию считаем SameSite=Lax (если фронт и API в одной «site»-зоне).
+  // Если реально сетап кросс-сайтовый (например, фронт на одном eTLD+1, API на другом, и вы хотите,
+  // чтобы Set-Cookie работал из кросс-сайтового контекста) — понадобится SameSite=None и Secure=true.
+  // Ниже оставляю Lax как безопасный дефолт. При необходимости поменяйте на 'None'.
+  if (isMeteor) {
+    return {
+      ...base,
+      domain: '.meteorhr.com',
+      secure: true,
+      sameSite: 'Lax', // если открываете cookie из третьей стороны/iframe — смените на 'None'
+    };
+  }
+  if (isCloudworkstations) {
+    return {
+      ...base,
+      domain: '.cloudworkstations.dev',
+      secure: true,
+      sameSite: 'Lax',
+    };
+  }
+
+  // Если пришёл неожиданный хост (например, stage-домен) — делаем host-only, но с Secure,
+  // т.к. почти наверняка это HTTPS.
+  return {
+    ...base,
+    secure: true,
+    sameSite: 'Lax',
+    // domain НЕ ставим → host-only на конкретный хост
+  };
+}
+
 
 
 /**
@@ -159,19 +233,15 @@ const applyRefreshResult = (request, reply, refreshResult) => {
     company: userId.company?._id,
     deviceId: request.headers[config.headers.deviceId]
   };
-  setRefreshTokenCookie(reply, newRefreshToken);
+  setRefreshTokenCookie(request, reply, newRefreshToken);
 };
 
 const setRefreshTokenCookie = (reply, token) => {
   const expiresTime = new Date(Date.now() + (1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays));
-  reply.setCookie(config.cookies.refreshTokenName, token, {
-    expires: expiresTime,
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Lax',
-    domain: process.env.DOMAIN,
-    path: '/'
-  });
+  const hostname = getHostnameFromRequest(request);
+  const cookieOpts = computeCookieOptionsByHost(hostname, expiresTime);
+
+  reply.setCookie(config.cookies.refreshTokenName, token, cookieOpts);
 };
 
 // ИСПРАВЛЕНО: Пейлоад не оборачивается в лишний объект
