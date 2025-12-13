@@ -1,4 +1,3 @@
-// authHook.js
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -15,9 +14,9 @@ import Company from './models/company.model.js';
 // ----- Конфигурация -----
 const config = {
   jwt: {
-    // Кол-во минут жизни access-токена. Ожидается число или строка вида "15".
+    // Кол-во минут жизни access-токена
     expiresIn: process.env.TOKEN_EXPIRATION_MINUTES || '15',
-    // Путь к приватному ключу (RS256), относительно текущего файла:
+    // Путь к приватному ключу (RS256)
     privateKeyPath: './keys/private.key',
   },
   redis: {
@@ -60,9 +59,14 @@ class TokenRefreshTimeoutError extends Error {
 
 // ----- Утилиты: анализ Origin/Host -----
 function getHostnameFromRequest(request) {
-  console.log('[jwt] incoming host:', request?.headers?.host, 'xfh:', request?.headers?.['x-forwarded-host'], 'origin:', request?.headers?.origin);
+  // Логируем заголовки для отладки
   const hostHdr = request?.headers?.['x-forwarded-host'] || request?.headers?.host;
+
+  // Для отладки в консоли
+  // console.log('[jwt] incoming host:', hostHdr, 'origin:', request?.headers?.origin);
+
   if (hostHdr) return hostHdr.split(':')[0].toLowerCase();
+
   const origin = request?.headers?.origin;
   if (origin) {
     try {
@@ -75,37 +79,51 @@ function getHostnameFromRequest(request) {
   return '';
 }
 
-function computeCookieOptionsByHost(hostname, expiresTime) {
-  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
-  const isMeteor =
-    hostname.endsWith('.meteorhr.com') || hostname === 'meteorhr.com';
+/**
+ * Вычисляет параметры Cookie в зависимости от окружения.
+ * Исправлено: добавлена логика для localhost -> production API.
+ */
+function computeCookieOptionsByHost(hostname, request, expiresTime) {
+  const origin = request?.headers?.origin || '';
+
+  // Определяем, является ли клиент локальным (разработчик)
+  const isClientLocalhost = origin.includes('localhost') || origin.includes('127.0.0.1');
+
+  // Определяем серверы
+  const isLocalhostServer = hostname === 'localhost' || hostname === '127.0.0.1';
+  const isMeteorServer = hostname.endsWith('.meteorhr.com') || hostname === 'meteorhr.com';
 
   const base = { httpOnly: true, path: '/', expires: expiresTime };
 
-  if (isLocalhost || hostname === '') {
-    // host-only без domain
+  // 1. Полностью локальная разработка (бэк на localhost)
+  if (isLocalhostServer || hostname === '') {
     return { ...base, secure: false, sameSite: 'Lax' };
   }
 
-  if (isMeteor && isClientLocalhost) {
-    // Не указываем domain (будет Host Only кука для api.meteorhr.com)
-    // Обязательно SameSite: None и Secure, так как это Cross-Site запрос (localhost -> api.meteorhr)
+  // 2. ГИБРИДНЫЙ РЕЖИМ: Бэк на проде (api.meteorhr.com), Фронт локально (localhost)
+  if (isMeteorServer && isClientLocalhost) {
+    console.log('[jwt] Setting Cross-Site cookie for Localhost development');
+    // ВАЖНО: 
+    // - secure: true (так как API на https)
+    // - sameSite: 'None' (чтобы кука летала между разными доменами)
+    // - domain: НЕ ЗАДАЕМ! (Пусть будет Host Only для api.meteorhr.com, иначе браузер на localhost заблокирует куку для .meteorhr.com)
     return { ...base, secure: true, sameSite: 'None' };
   }
 
-  if (isMeteor) {
-    // Кросс-сайт (API на api.*, фронт на app.*): нужен None+Secure
+  // 3. ПРОДАКШН: Бэк на проде, Фронт на проде
+  if (isMeteorServer) {
+    // Здесь нужен domain, чтобы кука была доступна и на api.* и на app.*
     return { ...base, domain: '.meteorhr.com', secure: true, sameSite: 'None' };
   }
 
-  // Дефолт: host-only, но Secure (почти наверняка HTTPS)
+  // Дефолт (неизвестный хост, считаем, что HTTPS)
   return { ...base, secure: true, sameSite: 'Lax' };
 }
 
 // ----- Генерация access-токена -----
 function generateAccessToken(payload) {
   return jwt.sign(payload, privateKey, {
-    expiresIn: `${config.jwt.expiresIn}m`, // минутная гранулярность
+    expiresIn: `${config.jwt.expiresIn}m`,
     algorithm: 'RS256',
   });
 }
@@ -116,8 +134,11 @@ function setRefreshTokenCookie(request, reply, token) {
     Date.now() + 1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays,
   );
   const hostname = getHostnameFromRequest(request);
-  console.log('[jwt] setRefreshTokenCookie hostname:', hostname);
-  const cookieOpts = computeCookieOptionsByHost(hostname, expiresTime);
+
+  // !!! Исправлено: передаем request вторым параметром
+  const cookieOpts = computeCookieOptionsByHost(hostname, request, expiresTime);
+
+  console.log('[jwt] setRefreshTokenCookie hostname:', hostname, 'opts:', JSON.stringify(cookieOpts));
   reply.setCookie(config.cookies.refreshTokenName, token, cookieOpts);
 }
 
@@ -128,11 +149,13 @@ function clearRefreshTokenCookie(request, reply) {
     expires: new Date(0),
     httpOnly: true,
   });
+
   // И пробуем зачистить доменные (если ставились)
   const hostname = getHostnameFromRequest(request);
   const domains = [];
   if (hostname.endsWith('.meteorhr.com')) domains.push('.meteorhr.com');
   if (hostname.endsWith('.cloudworkstations.dev')) domains.push('.cloudworkstations.dev');
+
   for (const d of domains) {
     reply.setCookie(config.cookies.refreshTokenName, '', {
       path: '/',
@@ -237,9 +260,6 @@ const RefreshTokenUpdate = async (request, reply) => {
   const lockKey = `lock:refresh:${oldRefreshToken}`;
   const resultKey = `result:refresh:${oldRefreshToken}`;
 
-  // ВАЖНО: синтаксис redis.set зависит от клиента. Ниже форма для node-redis@3/early-4.
-  // Если у вас node-redis@4 с объектом опций, используйте:
-  // await redis.set(lockKey, 'locked', { PX: config.redis.lockTtlMs, NX: true });
   const lockAcquired = await redis.set(
     lockKey,
     'locked',
@@ -279,14 +299,6 @@ const RefreshTokenUpdate = async (request, reply) => {
 };
 
 // ----- Вспомогательные обработчики -----
-async function removeInvalidRefreshToken(refreshToken) {
-  try {
-    await RefreshToken.findOneAndDelete({ token: refreshToken });
-  } catch (err) {
-    console.error(`Failed to remove invalid refresh token: ${err.message}`);
-  }
-}
-
 function handleServerError(reply, error) {
   console.error('Unhandled Authentication Error:', error);
   return reply
@@ -305,7 +317,8 @@ function handleAuthFailure(request, reply) {
 // ----- Экспортируемый хук Fastify -----
 export default () => {
   const authHook = async (request, reply) => {
-    console.log('[jwt] >>> new request', request.url, 'host', request.headers.host, 'deviceId', request.headers[config.headers.deviceId], 'hasRefresh', !!request.cookies[config.cookies.refreshTokenName], 'hasAuth', !!request.headers[config.headers.authToken]);
+    // console.log('[jwt] >>> new request', request.url, 'host', request.headers.host, 'hasRefresh', !!request.cookies[config.cookies.refreshTokenName]);
+
     const performTokenRefresh = async () => {
       try {
         await RefreshTokenUpdate(request, reply);
@@ -325,7 +338,10 @@ export default () => {
     const refreshToken = cookies[config.cookies.refreshTokenName];
     const deviceId = headers[config.headers.deviceId];
 
+    // Если нет deviceId или refresh-токена - сразу отбой
     if (!deviceId || !refreshToken) {
+      // Здесь можно добавить лог для дебага, почему именно 401
+      // console.log('[jwt] Missing credentials. DeviceId:', !!deviceId, 'RefreshToken:', !!refreshToken);
       return handleAuthFailure(request, reply);
     }
 
@@ -335,7 +351,7 @@ export default () => {
         const payloadFromToken = jwt.verify(accessToken, privateKey, {
           algorithms: ['RS256'],
         });
-        console.log('[jwt] access token valid');
+        // console.log('[jwt] access token valid');
         const payload = payloadFromToken.payload
           ? payloadFromToken.payload
           : payloadFromToken;
