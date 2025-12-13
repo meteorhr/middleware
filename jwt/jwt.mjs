@@ -8,13 +8,24 @@ import Company from './models/company.model.js';
 
 const privateKey = fs.readFileSync('./keys/private.key', 'utf8');
 const expires = process.env.TOKEN_EXPIRATION_MINUTES;
-const expiresTimeAsMs = Date.now() + (1000 * 60 * 60 * 24 * 60);
+const expiresAt = new Date(Date.now() + (1000 * 60 * 60 * 24 * 60));
 const isProd = process.env.NODE_ENV === 'production';
+
+const normalizeCookieDomain = () => {
+  const raw = process.env.DOMAIN;
+  if (!raw) return undefined;
+  // Отдаём куку на базовый домен, чтобы она работала с app.meteorhr.com и api.meteorhr.com
+  const withoutApi = raw.replace(/^api\./i, '');
+  const normalized = withoutApi.startsWith('.') ? withoutApi : `.${withoutApi}`;
+  return normalized;
+};
+
+const secureCookie = isProd || (!!process.env.DOMAIN && !process.env.DOMAIN.includes('localhost'));
 const cookieBaseOptions = {
   httpOnly: true,
-  secure: isProd,
-  sameSite: isProd ? 'None' : 'Lax',
-  domain: process.env.DOMAIN,
+  secure: secureCookie,
+  sameSite: secureCookie ? 'None' : 'Lax',
+  domain: normalizeCookieDomain(),
   path: '/'
 };
 
@@ -127,7 +138,7 @@ const setCookieAndSendErrorMessage = (reply, errorMsg) => {
 };
 
 const setRefreshTokenCookie = (res, token) => {
-  res.setCookie('refreshToken', token, { ...cookieBaseOptions, expires: expiresTimeAsMs });
+  res.setCookie('refreshToken', token, { ...cookieBaseOptions, expires: expiresAt });
 };
 
 /* 
