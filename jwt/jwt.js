@@ -76,17 +76,8 @@ function getHostnameFromRequest(request) {
  *    Кука всегда Host-Only (без domain), что делает её совместимой с любыми
  *    клиентскими доменами, разрешенными в CORS.
  */
-function computeCookieOptions(hostname, expiresTime) {
+function computeCookieOptions(expiresTime) {
   const base = { httpOnly: true, path: '/', expires: expiresTime };
-
-  const isLocalDev =
-    hostname === 'localhost' ||
-    hostname === '127.0.0.1' ||
-    hostname.endsWith('.local');
-
-  if (isLocalDev) {
-    return { ...base, secure: false, sameSite: 'Lax' };
-  }
 
   // Для всех остальных (https)
   return { ...base, secure: true, sameSite: 'None' };
@@ -105,9 +96,8 @@ function setRefreshTokenCookie(request, reply, token) {
   const expiresTime = new Date(
     Date.now() + 1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays,
   );
-  const hostname = getHostnameFromRequest(request);
 
-  const cookieOpts = computeCookieOptions(hostname, expiresTime);
+  const cookieOpts = computeCookieOptions(expiresTime);
 
   // console.log('[jwt] Setting cookie. Host:', hostname, 'Options:', JSON.stringify(cookieOpts));
 
