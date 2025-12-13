@@ -114,14 +114,6 @@ function clearRefreshTokenCookie(request, reply) {
     sameSite: 'None'
   });
 
-  // 2. Чистим Localhost вариант (на случай разработки)
-  reply.setCookie(config.cookies.refreshTokenName, '', {
-    path: '/',
-    expires: new Date(0),
-    httpOnly: true,
-    secure: false,
-    sameSite: 'Lax'
-  });
 }
 
 // ----- Применение результата refresh -----
