@@ -9,6 +9,14 @@ import Company from './models/company.model.js';
 const privateKey = fs.readFileSync('./keys/private.key', 'utf8');
 const expires = process.env.TOKEN_EXPIRATION_MINUTES;
 const expiresTimeAsMs = Date.now() + (1000 * 60 * 60 * 24 * 60);
+const isProd = process.env.NODE_ENV === 'production';
+const cookieBaseOptions = {
+  httpOnly: true,
+  secure: isProd,
+  sameSite: isProd ? 'None' : 'Lax',
+  domain: process.env.DOMAIN,
+  path: '/'
+};
 
 const HEADER_DEVICE_ID = 'x-device-id';
 const HEADER_AUTH_TOKEN = 'x-authentication-token';
@@ -26,9 +34,9 @@ const RefreshTokenUpdate = async (req, res, next) => {
 
     const findAndUpdate = await findRefreshTokenAndUpdated(refreshToken, deviceId);
 
-    if(!findAndUpdate){
+    if (!findAndUpdate) {
       await removeInvalidRefreshToken(refreshToken);
-      const errorResponse =  handleRefreshTokenNotUpdate(res);  
+      const errorResponse = handleRefreshTokenNotUpdate(res);
       return res.send(errorResponse);
     }
 
@@ -40,10 +48,10 @@ const RefreshTokenUpdate = async (req, res, next) => {
       company: payload.company._id,
       deviceId: deviceId
     }
-    
+
     // Установка обновленного RefreshToken в куки
     setRefreshTokenCookie(res, findAndUpdate.token);
-    
+
     return next;
   } catch (error) {
     return res.send(handleServerError(res, error));
@@ -66,31 +74,31 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     deviceId: deviceId,
     expired_at: { $gte: currentDate }
   }
-  
+
   const doc = {
-    token:  uuidv4(), // New Refresh Token
+    token: uuidv4(), // New Refresh Token
     updated_at: currentDate, // Current Date 
     expired_at: expiredDate, // Current Data + 60 days
-  }  
+  }
 
 
   const update = await RefreshToken
-    .findOneAndUpdate(findDoc, {$set: doc}, {
+    .findOneAndUpdate(findDoc, { $set: doc }, {
       new: true,
-      fields: { token:1, userId: 1 },
+      fields: { token: 1, userId: 1 },
     })
     .populate(
-      { 
-        path: 'userId', 
-        select: 'email phone telegram notification roles active name avatar company', 
+      {
+        path: 'userId',
+        select: 'email phone telegram notification roles active name avatar company',
         model: User,
         populate: {
-          path: 'company', 
-          select: 'currency', 
+          path: 'company',
+          select: 'currency',
           model: Company,
           populate: {
-            path: 'currency', 
-            select: 'code', 
+            path: 'currency',
+            select: 'code',
             model: Currencies,
           }
         }
@@ -113,24 +121,13 @@ const handleRefreshTokenNotUpdate = (res) => {
 };
 
 const setCookieAndSendErrorMessage = (reply, errorMsg) => {
-  reply.setCookie('refreshToken', '', {
-    httpOnly: false,
-    secure: false,
-    domain: process.env.DOMAIN,
-    path: '/',
-  });
+  reply.setCookie('refreshToken', '', { ...cookieBaseOptions, expires: new Date(0) });
   reply.status(401);
   return { success: false, code: 401, msg: errorMsg };
 };
 
 const setRefreshTokenCookie = (res, token) => {
-  res.setCookie('refreshToken', token, {
-    expires: expiresTimeAsMs,
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    domain: process.env.DOMAIN,
-    path: '/'
-  });
+  res.setCookie('refreshToken', token, { ...cookieBaseOptions, expires: expiresTimeAsMs });
 };
 
 /* 
@@ -143,51 +140,51 @@ const setRefreshTokenCookie = (res, token) => {
 
 export default () => {
   const middleware = async (req, reply, done) => {
-    try { 
+    try {
       // Получения headers, cookies из запроса 
-      const {headers, cookies} = req;
+      const { headers, cookies } = req;
       // Получения refreshToken
       const refreshToken = cookies.refreshToken;
       //console.log(cookies);
       //console.log("Refresh Token: " + refreshToken);
       // Если отсутствует Device ID в запросе, обнулить куки, поставить статус ответа 401, направить сообще об ошибки в формате JSON
-      if(!headers[HEADER_DEVICE_ID]){
+      if (!headers[HEADER_DEVICE_ID]) {
         return reply.send(setCookieAndSendErrorMessage(reply, 'Headers not found device id'));
       }
       // Если отсутствует Refresh Token в запросе, обнулить куки, поставить статус ответа 401, направить сообще об ошибки в формате JSON
-      if(!refreshToken){
+      if (!refreshToken) {
         return reply.send(setCookieAndSendErrorMessage(reply, 'Refresh Token not found'));
-      } 
+      }
 
       // Если существует Access Token
-      if(headers[HEADER_AUTH_TOKEN]){
-          const accessToken = headers[HEADER_AUTH_TOKEN];
-          const {exp, payload} = jwt.decode(accessToken, privateKey);
-          const expirationTime = exp * 1000
-          // Дата токена больше текущей даты
-          if (Date.now() <= expirationTime) {
-              try {
-                req.accessToken = generateAccessToken(payload);
-                req.session = {
-                  _id: payload._id,
-                  company: payload.company._id,
-                  deviceId: headers[HEADER_DEVICE_ID]
-                }
-                return done;
-              } catch(error){
-                return reply.send(handleServerError(reply, error));
-              }
-          } else {
-            // console.log('Update refresh token, expiration time access token');
-            return await RefreshTokenUpdate(req, reply, done);
+      if (headers[HEADER_AUTH_TOKEN]) {
+        const accessToken = headers[HEADER_AUTH_TOKEN];
+        const { exp, payload } = jwt.decode(accessToken, privateKey);
+        const expirationTime = exp * 1000
+        // Дата токена больше текущей даты
+        if (Date.now() <= expirationTime) {
+          try {
+            req.accessToken = generateAccessToken(payload);
+            req.session = {
+              _id: payload._id,
+              company: payload.company._id,
+              deviceId: headers[HEADER_DEVICE_ID]
+            }
+            return done;
+          } catch (error) {
+            return reply.send(handleServerError(reply, error));
           }
-      } else {
-          // console.log('Update refresh token, access token not found');
+        } else {
+          // console.log('Update refresh token, expiration time access token');
           return await RefreshTokenUpdate(req, reply, done);
-      }  
-    } catch(error) {
+        }
+      } else {
+        // console.log('Update refresh token, access token not found');
+        return await RefreshTokenUpdate(req, reply, done);
+      }
+    } catch (error) {
       reply.send(handleServerError(res, error));
-    } 
+    }
   }
 
   return middleware;
