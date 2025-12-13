@@ -60,6 +60,7 @@ class TokenRefreshTimeoutError extends Error {
 
 // ----- Утилиты: анализ Origin/Host -----
 function getHostnameFromRequest(request) {
+  console.log('[jwt] incoming host:', request?.headers?.host, 'xfh:', request?.headers?.['x-forwarded-host'], 'origin:', request?.headers?.origin);
   const origin = request?.headers?.origin;
   if (origin) {
     try {
@@ -109,6 +110,7 @@ function setRefreshTokenCookie(request, reply, token) {
     Date.now() + 1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays,
   );
   const hostname = getHostnameFromRequest(request);
+  console.log('[jwt] setRefreshTokenCookie hostname:', hostname);
   const cookieOpts = computeCookieOptionsByHost(hostname, expiresTime);
   reply.setCookie(config.cookies.refreshTokenName, token, cookieOpts);
 }
@@ -224,6 +226,7 @@ const RefreshTokenUpdate = async (request, reply) => {
   const { headers, cookies } = request;
   const oldRefreshToken = cookies[config.cookies.refreshTokenName];
   const deviceId = headers[config.headers.deviceId];
+  console.log('[jwt] RefreshTokenUpdate start deviceId:', deviceId, 'refresh exists:', !!oldRefreshToken);
 
   const lockKey = `lock:refresh:${oldRefreshToken}`;
   const resultKey = `result:refresh:${oldRefreshToken}`;
@@ -240,6 +243,7 @@ const RefreshTokenUpdate = async (request, reply) => {
   );
 
   if (lockAcquired) {
+    console.log('[jwt] refresh lock acquired');
     try {
       const result = await findRefreshTokenAndUpdated(oldRefreshToken, deviceId);
       if (!result) {
@@ -250,6 +254,7 @@ const RefreshTokenUpdate = async (request, reply) => {
       await redis.set(resultKey, JSON.stringify(result), 'EX', config.redis.resultTtlS);
       applyRefreshResult(request, reply, result);
     } catch (error) {
+      console.error('[jwt] refresh failed:', error?.message);
       await redis.set(
         resultKey,
         JSON.stringify({ error: true, message: error.message }),
@@ -261,6 +266,7 @@ const RefreshTokenUpdate = async (request, reply) => {
       await redis.del(lockKey);
     }
   } else {
+    console.log('[jwt] waiting for refresh result from another process');
     const result = await waitForRefreshResult(resultKey);
     applyRefreshResult(request, reply, result);
   }
@@ -283,6 +289,7 @@ function handleServerError(reply, error) {
 }
 
 function handleAuthFailure(request, reply) {
+  console.warn('[jwt] auth failure, clearing cookies');
   clearRefreshTokenCookie(request, reply);
   return reply
     .status(401)
@@ -292,6 +299,7 @@ function handleAuthFailure(request, reply) {
 // ----- Экспортируемый хук Fastify -----
 export default () => {
   const authHook = async (request, reply) => {
+    console.log('[jwt] >>> new request', request.url, 'host', request.headers.host, 'deviceId', request.headers[config.headers.deviceId], 'hasRefresh', !!request.cookies[config.cookies.refreshTokenName], 'hasAuth', !!request.headers[config.headers.authToken]);
     const performTokenRefresh = async () => {
       try {
         await RefreshTokenUpdate(request, reply);
@@ -321,6 +329,7 @@ export default () => {
         const payloadFromToken = jwt.verify(accessToken, privateKey, {
           algorithms: ['RS256'],
         });
+        console.log('[jwt] access token valid');
         const payload = payloadFromToken.payload
           ? payloadFromToken.payload
           : payloadFromToken;
@@ -335,11 +344,14 @@ export default () => {
         return; // Токен валиден — продолжаем
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
+          console.warn('[jwt] access token expired, refresh flow');
           return performTokenRefresh();
         }
+        console.error('[jwt] access token verify error:', error?.message);
         return handleAuthFailure(request, reply);
       }
     } else {
+      console.log('[jwt] access token missing, refresh flow');
       return performTokenRefresh();
     }
   };
