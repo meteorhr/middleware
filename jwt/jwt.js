@@ -87,6 +87,12 @@ function computeCookieOptionsByHost(hostname, expiresTime) {
     return { ...base, secure: false, sameSite: 'Lax' };
   }
 
+  if (isMeteor && isClientLocalhost) {
+    // Не указываем domain (будет Host Only кука для api.meteorhr.com)
+    // Обязательно SameSite: None и Secure, так как это Cross-Site запрос (localhost -> api.meteorhr)
+    return { ...base, secure: true, sameSite: 'None' };
+  }
+
   if (isMeteor) {
     // Кросс-сайт (API на api.*, фронт на app.*): нужен None+Secure
     return { ...base, domain: '.meteorhr.com', secure: true, sameSite: 'None' };
@@ -318,9 +324,12 @@ export default () => {
     const { headers, cookies } = request;
     const refreshToken = cookies[config.cookies.refreshTokenName];
     const deviceId = headers[config.headers.deviceId];
-    const accessToken = headers[config.headers.authToken];
 
-    // 1) Если есть access token — пробуем его верифицировать без обязательного refreshToken
+    if (!deviceId || !refreshToken) {
+      return handleAuthFailure(request, reply);
+    }
+
+    const accessToken = headers[config.headers.authToken];
     if (accessToken) {
       try {
         const payloadFromToken = jwt.verify(accessToken, privateKey, {
@@ -341,26 +350,16 @@ export default () => {
         return; // Токен валиден — продолжаем
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
-          if (!deviceId || !refreshToken) {
-            console.warn('[jwt] access token expired but no refreshToken/deviceId');
-            return handleAuthFailure(request, reply);
-          }
           console.warn('[jwt] access token expired, refresh flow');
           return performTokenRefresh();
         }
         console.error('[jwt] access token verify error:', error?.message);
         return handleAuthFailure(request, reply);
       }
+    } else {
+      console.log('[jwt] access token missing, refresh flow');
+      return performTokenRefresh();
     }
-
-    // 2) Нет access token — можно попробовать refresh только если есть deviceId и refreshToken
-    if (!deviceId || !refreshToken) {
-      console.warn('[jwt] no access token and missing refresh token/deviceId');
-      return handleAuthFailure(request, reply);
-    }
-
-    console.log('[jwt] access token missing, refresh flow');
-    return performTokenRefresh();
   };
 
   return authHook;
