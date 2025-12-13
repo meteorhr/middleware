@@ -78,9 +78,6 @@ function computeCookieOptionsByHost(hostname, expiresTime) {
   const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
   const isMeteor =
     hostname.endsWith('.meteorhr.com') || hostname === 'meteorhr.com';
-  const isCloudworkstations =
-    hostname.endsWith('.cloudworkstations.dev') ||
-    hostname === 'cloudworkstations.dev';
 
   const base = { httpOnly: true, path: '/', expires: expiresTime };
 
@@ -92,11 +89,6 @@ function computeCookieOptionsByHost(hostname, expiresTime) {
   if (isMeteor) {
     // Одна site-зона — достаточно Lax (если нет iframe/3rd-party сценариев)
     return { ...base, domain: '.meteorhr.com', secure: true, sameSite: 'Lax' };
-  }
-
-  if (isCloudworkstations) {
-    // В таких окружениях часто нужен None+Secure
-    return { ...base, domain: '.cloudworkstations.dev', secure: true, sameSite: 'None' };
   }
 
   // Дефолт: host-only, но Secure (почти наверняка HTTPS)
