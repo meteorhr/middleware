@@ -88,8 +88,8 @@ function computeCookieOptionsByHost(hostname, expiresTime) {
   }
 
   if (isMeteor) {
-    // Одна site-зона — достаточно Lax (если нет iframe/3rd-party сценариев)
-    return { ...base, domain: '.meteorhr.com', secure: true, sameSite: 'Lax' };
+    // Кросс-сайт (API на api.*, фронт на app.*): нужен None+Secure
+    return { ...base, domain: '.meteorhr.com', secure: true, sameSite: 'None' };
   }
 
   // Дефолт: host-only, но Secure (почти наверняка HTTPS)
