@@ -143,26 +143,29 @@ function setRefreshTokenCookie(request, reply, token) {
 }
 
 function clearRefreshTokenCookie(request, reply) {
-  // Чистим host-only
-  reply.setCookie(config.cookies.refreshTokenName, '', {
-    path: '/',
-    expires: new Date(0),
-    httpOnly: true,
-  });
-
-  // И пробуем зачистить доменные (если ставились)
   const hostname = getHostnameFromRequest(request);
   const domains = [];
-  if (hostname.endsWith('.meteorhr.com')) domains.push('.meteorhr.com');
-  if (hostname.endsWith('.cloudworkstations.dev')) domains.push('.cloudworkstations.dev');
+  if (hostname.endsWith('.meteorhr.com') || hostname === 'meteorhr.com') domains.push('.meteorhr.com');
+  if (hostname.endsWith('.cloudworkstations.dev') || hostname === 'cloudworkstations.dev') domains.push('.cloudworkstations.dev');
 
-  for (const d of domains) {
+  // Если домен определён, чистим только доменную куку (не создавая host-only дубликат)
+  if (domains.length > 0) {
+    for (const d of domains) {
+      reply.setCookie(config.cookies.refreshTokenName, '', {
+        path: '/',
+        domain: d,
+        expires: new Date(0),
+        httpOnly: true,
+        secure: true,
+        sameSite: 'None',
+      });
+    }
+  } else {
+    // Локальный хост — чистим host-only
     reply.setCookie(config.cookies.refreshTokenName, '', {
       path: '/',
-      domain: d,
       expires: new Date(0),
       httpOnly: true,
-      secure: true,
     });
   }
 }
