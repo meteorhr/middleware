@@ -69,17 +69,20 @@ function getHostnameFromRequest(request) {
 }
 
 /**
- * Универсальная конфигурация куки.
- * 
- * 1. Localhost -> Secure: false.
- * 2. Любой другой хост (Prod/Staging) -> Secure: true, SameSite: None.
- *    Кука всегда Host-Only (без domain), что делает её совместимой с любыми
- *    клиентскими доменами, разрешенными в CORS.
+ * Конфигурация куки с учётом хоста/протокола.
+ * - localhost/http: secure=false, sameSite=Lax
+ * - https-домены: secure=true, sameSite=None (host-only)
  */
-function computeCookieOptions(expiresTime) {
+function computeCookieOptions(request, expiresTime) {
   const base = { httpOnly: true, path: '/', expires: expiresTime };
+  const host = (request?.headers?.host || '').toLowerCase();
+  const proto = (request?.headers?.['x-forwarded-proto'] || '').toLowerCase();
+  const isLocal = host.includes('localhost') || host.includes('127.0.0.1') || proto === 'http';
 
-  // Для всех остальных (https)
+  if (isLocal) {
+    return { ...base, secure: false, sameSite: 'Lax' };
+  }
+
   return { ...base, secure: true, sameSite: 'None' };
 }
 
@@ -97,7 +100,7 @@ function setRefreshTokenCookie(request, reply, token) {
     Date.now() + 1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays,
   );
 
-  const cookieOpts = computeCookieOptions(expiresTime);
+  const cookieOpts = computeCookieOptions(request, expiresTime);
 
   // console.log('[jwt] Setting cookie. Host:', hostname, 'Options:', JSON.stringify(cookieOpts));
 
