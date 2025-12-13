@@ -61,6 +61,8 @@ class TokenRefreshTimeoutError extends Error {
 // ----- Утилиты: анализ Origin/Host -----
 function getHostnameFromRequest(request) {
   console.log('[jwt] incoming host:', request?.headers?.host, 'xfh:', request?.headers?.['x-forwarded-host'], 'origin:', request?.headers?.origin);
+  const hostHdr = request?.headers?.['x-forwarded-host'] || request?.headers?.host;
+  if (hostHdr) return hostHdr.split(':')[0].toLowerCase();
   const origin = request?.headers?.origin;
   if (origin) {
     try {
@@ -69,8 +71,6 @@ function getHostnameFromRequest(request) {
       // игнор
     }
   }
-  const hostHdr = request?.headers?.['x-forwarded-host'] || request?.headers?.host;
-  if (hostHdr) return hostHdr.split(':')[0].toLowerCase();
   if (request?.hostname) return String(request.hostname).toLowerCase();
   return '';
 }
