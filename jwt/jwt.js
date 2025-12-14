@@ -14,7 +14,7 @@ import Company from './models/company.model.js';
 // ----- Конфигурация -----
 const config = {
   jwt: {
-    expiresIn: process.env.TOKEN_EXPIRATION_MINUTES || '15',
+    expiresIn: '1',
     privateKeyPath: './keys/private.key',
   },
   redis: {
