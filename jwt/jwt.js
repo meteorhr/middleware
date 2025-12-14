@@ -104,13 +104,13 @@ function setRefreshTokenCookie(request, reply, token) {
 
   // console.log('[jwt] Setting cookie. Host:', hostname, 'Options:', JSON.stringify(cookieOpts));
 
-  console.log('DEBUG COOKIE:', {
-    name: config.cookies.refreshTokenName,
-    opts: cookieOpts,
-    protocol: request.protocol,
-    host: request.hostname,
-    token: token
-  });
+  //console.log('DEBUG COOKIE:', {
+  //  name: config.cookies.refreshTokenName,
+  //  opts: cookieOpts,
+  //  protocol: request.protocol,
+  //  host: request.hostname,
+  // token: token
+  //});
 
 
   reply.setCookie(config.cookies.refreshTokenName, token, cookieOpts);
@@ -183,15 +183,15 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
   });
 
   if (!oldTokenDoc) {
-    console.error(
-      `[Auth] Refresh token rotation failed. Token not found or expired. Token: ${refreshToken}, DeviceID: ${deviceId}`,
-    );
+    //console.error(
+    //  `[Auth] Refresh token rotation failed. Token not found or expired. Token: ${refreshToken}, DeviceID: ${deviceId}`,
+    //);
     return null;
   }
   if (!oldTokenDoc.userId) {
-    console.error(
-      `[Auth] Orphaned refresh token found and deleted. Token: ${refreshToken}`,
-    );
+    //console.error(
+    //  `[Auth] Orphaned refresh token found and deleted. Token: ${refreshToken}`,
+    //);
     return null;
   }
 
@@ -240,7 +240,7 @@ const RefreshTokenUpdate = async (request, reply) => {
       await redis.set(resultKey, JSON.stringify(result), 'EX', config.redis.resultTtlS);
       applyRefreshResult(request, reply, result);
     } catch (error) {
-      console.error('[jwt] refresh failed:', error?.message);
+      //console.error('[jwt] refresh failed:', error?.message);
       await redis.set(
         resultKey,
         JSON.stringify({ error: true, message: error.message }),
@@ -260,14 +260,14 @@ const RefreshTokenUpdate = async (request, reply) => {
 
 // ----- Вспомогательные обработчики -----
 function handleServerError(reply, error) {
-  console.error('Unhandled Authentication Error:', error);
+  //console.error('Unhandled Authentication Error:', error);
   return reply
     .status(500)
     .send({ success: false, code: 500, msg: 'Internal Server Error' });
 }
 
 function handleAuthFailure(request, reply) {
-  console.warn('[jwt] auth failure, clearing cookies');
+  //console.warn('[jwt] auth failure, clearing cookies');
   clearRefreshTokenCookie(request, reply);
   return reply
     .status(401)
@@ -319,14 +319,14 @@ export default () => {
         return;
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
-          console.warn('[jwt] access token expired, refresh flow');
+          //console.warn('[jwt] access token expired, refresh flow');
           return performTokenRefresh();
         }
-        console.error('[jwt] access token verify error:', error?.message);
+        //console.error('[jwt] access token verify error:', error?.message);
         return handleAuthFailure(request, reply);
       }
     } else {
-      console.log('[jwt] access token missing, refresh flow');
+      //console.log('[jwt] access token missing, refresh flow');
       return performTokenRefresh();
     }
   };
