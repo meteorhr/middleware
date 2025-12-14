@@ -104,6 +104,15 @@ function setRefreshTokenCookie(request, reply, token) {
 
   // console.log('[jwt] Setting cookie. Host:', hostname, 'Options:', JSON.stringify(cookieOpts));
 
+  console.log('DEBUG COOKIE:', {
+    name: config.cookies.refreshTokenName,
+    opts: cookieOpts,
+    protocol: request.protocol,
+    host: request.hostname,
+    token: token
+  });
+
+
   reply.setCookie(config.cookies.refreshTokenName, token, cookieOpts);
 }
 
