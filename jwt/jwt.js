@@ -172,7 +172,7 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     expired_at: { $gte: currentDate },
   }).populate({
     path: 'userId',
-    select: 'email phone telegram notification roles active name company',
+    select: '_id',
     model: User,
     populate: {
       path: 'company',
