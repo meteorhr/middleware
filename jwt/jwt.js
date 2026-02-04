@@ -14,14 +14,16 @@ import Company from './models/company.model.js';
 // ----- Конфигурация -----
 const config = {
   jwt: {
-    expiresIn: '1',
+    expiresIn: process.env.TOKEN_EXPIRATION_MINUTES || '15',
     privateKeyPath: './keys/private.key',
+    publicKeyPath: './keys/public.key',
   },
   redis: {
     lockTtlMs: 5000,
     resultTtlS: 10,
     pollingIntervalMs: 200,
     pollingAttempts: 25,
+    channelPrefix: 'refresh:done:',
   },
   headers: {
     deviceId: 'x-device-id',
@@ -31,13 +33,19 @@ const config = {
     refreshTokenName: 'refreshToken',
   },
   refreshTokenLifetimeDays: 60,
+  deviceIdMaxLength: 128,
 };
 
-// ----- Ключ подписи -----
+// ----- Ключи подписи / верификации -----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 const privateKey = fs.readFileSync(
   path.resolve(__dirname, config.jwt.privateKeyPath),
+  'utf8',
+);
+const publicKey = fs.readFileSync(
+  path.resolve(__dirname, config.jwt.publicKeyPath),
   'utf8',
 );
 
@@ -56,6 +64,16 @@ class TokenRefreshTimeoutError extends Error {
 }
 
 // ----- Утилиты -----
+
+/**
+ * Валидация deviceId — только допустимые символы, ограничение длины.
+ */
+function isValidDeviceId(deviceId) {
+  if (!deviceId || typeof deviceId !== 'string') return false;
+  if (deviceId.length > config.deviceIdMaxLength) return false;
+  // Допускаем буквы, цифры, дефисы, подчёркивания, точки
+  return /^[a-zA-Z0-9\-_.]+$/.test(deviceId);
+}
 
 /**
  * Получает чистый hostname из запроса.
@@ -86,6 +104,32 @@ function computeCookieOptions(request, expiresTime) {
   return { ...base, secure: true, sameSite: 'None' };
 }
 
+/**
+ * Безопасный JSON.parse с обработкой ошибок.
+ */
+function safeJsonParse(data) {
+  try {
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
+}
+
+// ----- Проверка доступности Redis -----
+let redisAvailable = true;
+
+redis.on('error', () => {
+  redisAvailable = false;
+});
+
+redis.on('ready', () => {
+  redisAvailable = true;
+});
+
+redis.on('connect', () => {
+  redisAvailable = true;
+});
+
 // ----- Генерация access-токена -----
 function generateAccessToken(payload) {
   return jwt.sign(payload, privateKey, {
@@ -101,23 +145,10 @@ function setRefreshTokenCookie(request, reply, token) {
   );
 
   const cookieOpts = computeCookieOptions(request, expiresTime);
-
-  // console.log('[jwt] Setting cookie. Host:', hostname, 'Options:', JSON.stringify(cookieOpts));
-
-  //console.log('DEBUG COOKIE:', {
-  //  name: config.cookies.refreshTokenName,
-  //  opts: cookieOpts,
-  //  protocol: request.protocol,
-  //  host: request.hostname,
-  // token: token
-  //});
-
-
   reply.setCookie(config.cookies.refreshTokenName, token, cookieOpts);
 }
 
 function clearRefreshTokenCookie(request, reply) {
-  // 1. Чистим Host-Only куку (основной вариант для Prod)
   reply.setCookie(config.cookies.refreshTokenName, '', {
     path: '/',
     expires: new Date(0),
@@ -125,7 +156,6 @@ function clearRefreshTokenCookie(request, reply) {
     secure: true,
     sameSite: 'None'
   });
-
 }
 
 // ----- Применение результата refresh -----
@@ -142,24 +172,106 @@ function applyRefreshResult(request, reply, refreshResult) {
   reply.header(config.headers.authToken, newAccessToken);
 }
 
-// ----- Ожидание результата refresh из другого процесса -----
-async function waitForRefreshResult(resultKey) {
-  for (let i = 0; i < config.redis.pollingAttempts; i++) {
-    await new Promise((resolve) =>
-      setTimeout(resolve, config.redis.pollingIntervalMs),
-    );
-    const resultData = await redis.get(resultKey);
-    if (resultData) {
-      const result = JSON.parse(resultData);
-      if (result.error) {
-        throw new TokenRefreshFailedError(
-          `Another process failed to refresh token: ${result.message}`,
-        );
-      }
-      return result;
+// ----- Lua-скрипт для атомарного удаления лока (только если он наш) -----
+const RELEASE_LOCK_SCRIPT = `
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+  else
+    return 0
+  end
+`;
+
+// ----- Ожидание результата refresh через pub/sub + polling fallback -----
+async function waitForRefreshResult(resultKey, channel) {
+  // Сначала проверяем, есть ли уже результат
+  const existingResult = await redis.get(resultKey);
+  if (existingResult) {
+    const parsed = safeJsonParse(existingResult);
+    if (!parsed) {
+      throw new TokenRefreshFailedError('Corrupted refresh result data');
     }
+    if (parsed.error) {
+      throw new TokenRefreshFailedError(
+        `Another process failed to refresh token: ${parsed.message}`,
+      );
+    }
+    return parsed;
   }
-  throw new TokenRefreshTimeoutError('Timed out waiting for token refresh result.');
+
+  // Используем pub/sub + polling для ожидания результата
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pollTimer;
+    let timeoutTimer;
+    const subscriber = redis.duplicate();
+
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      clearInterval(pollTimer);
+      clearTimeout(timeoutTimer);
+      subscriber.unsubscribe(channel).catch(() => {});
+      subscriber.disconnect();
+    };
+
+    // Pub/sub — мгновенное получение результата
+    subscriber.subscribe(channel).then(() => {
+      subscriber.on('message', (_ch, message) => {
+        if (settled) return;
+        const result = safeJsonParse(message);
+        if (!result) {
+          cleanup();
+          return reject(new TokenRefreshFailedError('Corrupted refresh result data'));
+        }
+        cleanup();
+        if (result.error) {
+          return reject(
+            new TokenRefreshFailedError(`Another process failed: ${result.message}`),
+          );
+        }
+        return resolve(result);
+      });
+    }).catch(() => {
+      // Если pub/sub недоступен — полагаемся на polling
+    });
+
+    // Polling fallback — на случай если pub/sub не сработал
+    let attempts = 0;
+    pollTimer = setInterval(async () => {
+      if (settled) return;
+      attempts++;
+      try {
+        const resultData = await redis.get(resultKey);
+        if (resultData) {
+          const result = safeJsonParse(resultData);
+          if (!result) {
+            cleanup();
+            return reject(new TokenRefreshFailedError('Corrupted refresh result data'));
+          }
+          cleanup();
+          if (result.error) {
+            return reject(
+              new TokenRefreshFailedError(`Another process failed: ${result.message}`),
+            );
+          }
+          return resolve(result);
+        }
+      } catch {
+        // Redis read error — continue polling
+      }
+
+      if (attempts >= config.redis.pollingAttempts) {
+        cleanup();
+        reject(new TokenRefreshTimeoutError('Timed out waiting for token refresh result.'));
+      }
+    }, config.redis.pollingIntervalMs);
+
+    // Абсолютный таймаут
+    timeoutTimer = setTimeout(() => {
+      cleanup();
+      reject(new TokenRefreshTimeoutError('Timed out waiting for token refresh result.'));
+    }, config.redis.lockTtlMs + 1000);
+  });
 }
 
 // ----- Ротация refresh-токена -----
@@ -183,15 +295,9 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
   });
 
   if (!oldTokenDoc) {
-    //console.error(
-    //  `[Auth] Refresh token rotation failed. Token not found or expired. Token: ${refreshToken}, DeviceID: ${deviceId}`,
-    //);
     return null;
   }
   if (!oldTokenDoc.userId) {
-    //console.error(
-    //  `[Auth] Orphaned refresh token found and deleted. Token: ${refreshToken}`,
-    //);
     return null;
   }
 
@@ -215,21 +321,48 @@ const RefreshTokenUpdate = async (request, reply) => {
   const { headers, cookies } = request;
   const oldRefreshToken = cookies[config.cookies.refreshTokenName];
   const deviceId = headers[config.headers.deviceId];
-  // console.log('[jwt] RefreshTokenUpdate start deviceId:', deviceId, 'refresh exists:', !!oldRefreshToken);
+
+  // Если Redis недоступен — выполняем refresh напрямую (без лока)
+  if (!redisAvailable) {
+    const result = await findRefreshTokenAndUpdated(oldRefreshToken, deviceId);
+    if (!result) {
+      throw new TokenRefreshFailedError(
+        'Refresh token not found, expired, or already used',
+      );
+    }
+    applyRefreshResult(request, reply, result);
+    return;
+  }
 
   const lockKey = `lock:refresh:${oldRefreshToken}`;
   const resultKey = `result:refresh:${oldRefreshToken}`;
+  const channel = `${config.redis.channelPrefix}${oldRefreshToken}`;
 
-  const lockAcquired = await redis.set(
-    lockKey,
-    'locked',
-    'PX',
-    config.redis.lockTtlMs,
-    'NX',
-  );
+  // Уникальный идентификатор владельца лока — защита от удаления чужого лока
+  const lockOwner = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+
+  let lockAcquired;
+  try {
+    lockAcquired = await redis.set(
+      lockKey,
+      lockOwner,
+      'PX',
+      config.redis.lockTtlMs,
+      'NX',
+    );
+  } catch {
+    // Redis ошибка при попытке взять лок — выполняем без лока
+    const result = await findRefreshTokenAndUpdated(oldRefreshToken, deviceId);
+    if (!result) {
+      throw new TokenRefreshFailedError(
+        'Refresh token not found, expired, or already used',
+      );
+    }
+    applyRefreshResult(request, reply, result);
+    return;
+  }
 
   if (lockAcquired) {
-    // console.log('[jwt] refresh lock acquired');
     try {
       const result = await findRefreshTokenAndUpdated(oldRefreshToken, deviceId);
       if (!result) {
@@ -237,37 +370,51 @@ const RefreshTokenUpdate = async (request, reply) => {
           'Refresh token not found, expired, or already used',
         );
       }
-      await redis.set(resultKey, JSON.stringify(result), 'EX', config.redis.resultTtlS);
+
+      const resultJson = JSON.stringify(result);
+
+      // Сохраняем результат и публикуем для ожидающих процессов
+      await Promise.all([
+        redis.set(resultKey, resultJson, 'EX', config.redis.resultTtlS),
+        redis.publish(channel, resultJson),
+      ]);
+
       applyRefreshResult(request, reply, result);
     } catch (error) {
-      //console.error('[jwt] refresh failed:', error?.message);
-      await redis.set(
-        resultKey,
-        JSON.stringify({ error: true, message: error.message }),
-        'EX',
-        config.redis.resultTtlS,
-      );
+      const errorJson = JSON.stringify({ error: true, message: error.message });
+      try {
+        await Promise.all([
+          redis.set(resultKey, errorJson, 'EX', config.redis.resultTtlS),
+          redis.publish(channel, errorJson),
+        ]);
+      } catch {
+        // Ignore Redis errors during error reporting
+      }
       throw error;
     } finally {
-      await redis.del(lockKey);
+      // Атомарное удаление лока — только если мы его владелец
+      try {
+        await redis.eval(RELEASE_LOCK_SCRIPT, 1, lockKey, lockOwner);
+      } catch {
+        // Ignore Redis errors during lock release
+      }
     }
   } else {
-    // console.log('[jwt] waiting for refresh result from another process');
-    const result = await waitForRefreshResult(resultKey);
+    // Ожидаем результат от другого процесса через pub/sub + polling
+    const result = await waitForRefreshResult(resultKey, channel);
     applyRefreshResult(request, reply, result);
   }
 };
 
 // ----- Вспомогательные обработчики -----
 function handleServerError(reply, error) {
-  //console.error('Unhandled Authentication Error:', error);
+  console.error('Unhandled Authentication Error:', error?.message);
   return reply
     .status(500)
     .send({ success: false, code: 500, msg: 'Internal Server Error' });
 }
 
 function handleAuthFailure(request, reply) {
-  //console.warn('[jwt] auth failure, clearing cookies');
   clearRefreshTokenCookie(request, reply);
   return reply
     .status(401)
@@ -300,10 +447,16 @@ export default () => {
       return handleAuthFailure(request, reply);
     }
 
+    // Валидация deviceId
+    if (!isValidDeviceId(deviceId)) {
+      return handleAuthFailure(request, reply);
+    }
+
     const accessToken = headers[config.headers.authToken];
     if (accessToken) {
       try {
-        const payloadFromToken = jwt.verify(accessToken, privateKey, {
+        // Используем публичный ключ для верификации (не приватный)
+        const payloadFromToken = jwt.verify(accessToken, publicKey, {
           algorithms: ['RS256'],
         });
         const payload = payloadFromToken.payload
@@ -319,14 +472,11 @@ export default () => {
         return;
       } catch (error) {
         if (error.name === 'TokenExpiredError') {
-          //console.warn('[jwt] access token expired, refresh flow');
           return performTokenRefresh();
         }
-        //console.error('[jwt] access token verify error:', error?.message);
         return handleAuthFailure(request, reply);
       }
     } else {
-      //console.log('[jwt] access token missing, refresh flow');
       return performTokenRefresh();
     }
   };

@@ -1,15 +1,10 @@
 import mongoose from 'mongoose';
-import Config from '../config/mongodb.js';
+import { identConnection } from '../config/mongodb.js';
 
-const _db = await mongoose.createConnection(
-  Config.ident,
-  Config.option
-);
 const UserSchema = new mongoose.Schema({
   email: {
     type: String,
   },
-
   phone: {
     type: String,
   },
@@ -36,9 +31,9 @@ const UserSchema = new mongoose.Schema({
   avatar: {
     type: String,
   },
-  company: { type: mongoose.Schema.ObjectId},
+  company: { type: mongoose.Schema.ObjectId },
 });
 
-const User = _db.model('User', UserSchema);
+const User = identConnection.model('User', UserSchema);
 
-export default User
+export default User;

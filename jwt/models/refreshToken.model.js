@@ -1,10 +1,5 @@
 import mongoose from 'mongoose';
-import Config from '../config/mongodb.js';
-
-const _db = await mongoose.createConnection(
-  Config.ident,
-  Config.option
-);
+import { identConnection } from '../config/mongodb.js';
 
 const RefreshTokenSchema = new mongoose.Schema({
   token: {
@@ -29,18 +24,19 @@ const RefreshTokenSchema = new mongoose.Schema({
   },
   created_at: {
     type: Date,
-    default: new Date()
+    default: Date.now
   },
   updated_at: {
     type: Date,
-    default: new Date()
+    default: Date.now
   }
-})
+});
 
-RefreshTokenSchema.pre('save', function(next){
+RefreshTokenSchema.pre('save', function(next) {
+  this.updated_at = new Date();
   return next();
-})
+});
 
-const RefreshToken = _db.model('RefreshToken', RefreshTokenSchema);
+const RefreshToken = identConnection.model('RefreshToken', RefreshTokenSchema);
 
-export default RefreshToken
+export default RefreshToken;
