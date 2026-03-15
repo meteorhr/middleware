@@ -31,6 +31,7 @@ const config = {
   },
   cookies: {
     refreshTokenName: 'refreshToken',
+    accessTokenName: 'accessToken',
   },
   refreshTokenLifetimeDays: 60,
   deviceIdMaxLength: 128,
@@ -104,6 +105,12 @@ function computeCookieOptions(request, expiresTime) {
   return { ...base, secure: true, sameSite: 'None' };
 }
 
+function getAccessTokenLifetimeMs() {
+  const parsed = parseInt(String(config.jwt.expiresIn), 10);
+  const tokenLifetimeMinutes = Number.isFinite(parsed) && parsed > 0 ? parsed : 15;
+  return tokenLifetimeMinutes * 60 * 1000;
+}
+
 /**
  * Безопасный JSON.parse с обработкой ошибок.
  */
@@ -148,14 +155,16 @@ function setRefreshTokenCookie(request, reply, token) {
   reply.setCookie(config.cookies.refreshTokenName, token, cookieOpts);
 }
 
-function clearRefreshTokenCookie(request, reply) {
-  reply.setCookie(config.cookies.refreshTokenName, '', {
-    path: '/',
-    expires: new Date(0),
-    httpOnly: true,
-    secure: true,
-    sameSite: 'None'
-  });
+function setAccessTokenCookie(request, reply, token) {
+  const expiresTime = new Date(Date.now() + getAccessTokenLifetimeMs());
+  const cookieOpts = computeCookieOptions(request, expiresTime);
+  reply.setCookie(config.cookies.accessTokenName, token, cookieOpts);
+}
+
+function clearAuthCookies(request, reply) {
+  const expiredCookieOpts = computeCookieOptions(request, new Date(0));
+  reply.setCookie(config.cookies.refreshTokenName, '', expiredCookieOpts);
+  reply.setCookie(config.cookies.accessTokenName, '', expiredCookieOpts);
 }
 
 // ----- Применение результата refresh -----
@@ -168,6 +177,7 @@ function applyRefreshResult(request, reply, refreshResult) {
     company: userId.company?._id,
     deviceId: request.headers[config.headers.deviceId],
   };
+  setAccessTokenCookie(request, reply, newAccessToken);
   setRefreshTokenCookie(request, reply, newRefreshToken);
   reply.header(config.headers.authToken, newAccessToken);
 }
@@ -415,7 +425,7 @@ function handleServerError(reply, error) {
 }
 
 function handleAuthFailure(request, reply) {
-  clearRefreshTokenCookie(request, reply);
+  clearAuthCookies(request, reply);
   return reply
     .status(401)
     .send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
@@ -452,7 +462,8 @@ export default () => {
       return handleAuthFailure(request, reply);
     }
 
-    const accessToken = headers[config.headers.authToken];
+    const accessToken = headers[config.headers.authToken]
+      || cookies[config.cookies.accessTokenName];
     if (accessToken) {
       try {
         // Используем публичный ключ для верификации (не приватный)
