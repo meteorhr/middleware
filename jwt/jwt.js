@@ -32,6 +32,7 @@ const config = {
   cookies: {
     refreshTokenName: 'refreshToken',
     accessTokenName: 'accessToken',
+    secret: process.env.COOKIE_SECRET,
   },
   refreshTokenLifetimeDays: 60,
   deviceIdMaxLength: 128,
@@ -49,6 +50,10 @@ const publicKey = fs.readFileSync(
   path.resolve(__dirname, config.jwt.publicKeyPath),
   'utf8',
 );
+
+if (!config.cookies.secret) {
+  throw new Error('COOKIE_SECRET is required');
+}
 
 // ----- Классы ошибок -----
 class TokenRefreshFailedError extends Error {
@@ -152,19 +157,41 @@ function setRefreshTokenCookie(request, reply, token) {
   );
 
   const cookieOpts = computeCookieOptions(request, expiresTime);
-  reply.setCookie(config.cookies.refreshTokenName, token, cookieOpts);
+  reply.setCookie(config.cookies.refreshTokenName, token, {
+    ...cookieOpts,
+    signed: true,
+  });
 }
 
 function setAccessTokenCookie(request, reply, token) {
   const expiresTime = new Date(Date.now() + getAccessTokenLifetimeMs());
   const cookieOpts = computeCookieOptions(request, expiresTime);
-  reply.setCookie(config.cookies.accessTokenName, token, cookieOpts);
+  reply.setCookie(config.cookies.accessTokenName, token, {
+    ...cookieOpts,
+    signed: true,
+  });
 }
 
 function clearAuthCookies(request, reply) {
   const expiredCookieOpts = computeCookieOptions(request, new Date(0));
-  reply.setCookie(config.cookies.refreshTokenName, '', expiredCookieOpts);
-  reply.setCookie(config.cookies.accessTokenName, '', expiredCookieOpts);
+  reply.setCookie(config.cookies.refreshTokenName, '', {
+    ...expiredCookieOpts,
+    signed: true,
+  });
+  reply.setCookie(config.cookies.accessTokenName, '', {
+    ...expiredCookieOpts,
+    signed: true,
+  });
+}
+
+function getSignedCookieValue(request, name) {
+  const rawCookieValue = request?.cookies?.[name];
+  if (!rawCookieValue) return null;
+  if (typeof request.unsignCookie !== 'function') return null;
+
+  const { valid, value } = request.unsignCookie(rawCookieValue);
+  if (!valid) return null;
+  return value;
 }
 
 // ----- Применение результата refresh -----
@@ -328,9 +355,12 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
 
 // ----- Основной refresh-процесс с распределённым локом -----
 const RefreshTokenUpdate = async (request, reply) => {
-  const { headers, cookies } = request;
-  const oldRefreshToken = cookies[config.cookies.refreshTokenName];
+  const { headers } = request;
+  const oldRefreshToken = getSignedCookieValue(request, config.cookies.refreshTokenName);
   const deviceId = headers[config.headers.deviceId];
+  if (!oldRefreshToken) {
+    throw new TokenRefreshFailedError('Refresh token is missing or invalid');
+  }
 
   // Если Redis недоступен — выполняем refresh напрямую (без лока)
   if (!redisAvailable) {
@@ -449,8 +479,8 @@ export default () => {
       }
     };
 
-    const { headers, cookies } = request;
-    const refreshToken = cookies[config.cookies.refreshTokenName];
+    const { headers } = request;
+    const refreshToken = getSignedCookieValue(request, config.cookies.refreshTokenName);
     const deviceId = headers[config.headers.deviceId];
 
     if (!deviceId || !refreshToken) {
@@ -463,7 +493,7 @@ export default () => {
     }
 
     const accessToken = headers[config.headers.authToken]
-      || cookies[config.cookies.accessTokenName];
+      || getSignedCookieValue(request, config.cookies.accessTokenName);
     if (accessToken) {
       try {
         // Используем публичный ключ для верификации (не приватный)
