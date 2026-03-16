@@ -32,6 +32,7 @@ const config = {
   cookies: {
     refreshTokenName: 'refreshToken',
     accessTokenName: 'accessToken',
+    deviceIdName: 'deviceId',
     secret: process.env.COOKIE_SECRET,
   },
   refreshTokenLifetimeDays: 60,
@@ -172,6 +173,17 @@ function setAccessTokenCookie(request, reply, token) {
   });
 }
 
+function setDeviceIdCookie(request, reply, deviceId) {
+  const expiresTime = new Date(
+    Date.now() + 1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays,
+  );
+  const cookieOpts = computeCookieOptions(request, expiresTime);
+  reply.setCookie(config.cookies.deviceIdName, deviceId, {
+    ...cookieOpts,
+    signed: true,
+  });
+}
+
 function clearAuthCookies(request, reply) {
   const expiredCookieOpts = computeCookieOptions(request, new Date(0));
   reply.setCookie(config.cookies.refreshTokenName, '', {
@@ -198,11 +210,15 @@ function getSignedCookieValue(request, name) {
 function applyRefreshResult(request, reply, refreshResult) {
   const { userId, token: newRefreshToken } = refreshResult;
   const newAccessToken = generateAccessToken(userId);
+  
+  const deviceId = getSignedCookieValue(request, config.cookies.deviceIdName)
+  || request.headers[config.headers.deviceId];
+  
   request.accessToken = newAccessToken;
   request.session = {
     _id: userId._id,
     company: userId.company?._id,
-    deviceId: request.headers[config.headers.deviceId],
+    deviceId,
   };
   setAccessTokenCookie(request, reply, newAccessToken);
   setRefreshTokenCookie(request, reply, newRefreshToken);
@@ -357,7 +373,8 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
 const RefreshTokenUpdate = async (request, reply) => {
   const { headers } = request;
   const oldRefreshToken = getSignedCookieValue(request, config.cookies.refreshTokenName);
-  const deviceId = headers[config.headers.deviceId];
+ const deviceId = getSignedCookieValue(request, config.cookies.deviceIdName)
+    || headers[config.headers.deviceId];
   if (!oldRefreshToken) {
     throw new TokenRefreshFailedError('Refresh token is missing or invalid');
   }
@@ -455,7 +472,14 @@ function handleServerError(reply, error) {
 }
 
 function handleAuthFailure(request, reply) {
-  clearAuthCookies(request, reply);
+ // Очищаем только accessToken, НЕ трогаем refreshToken и deviceId.
+  // Если ошибка временная (Redis/DB), пользователь сможет восстановить сессию.
+  // Полная очистка кук — только при явном logout.
+  const expiredCookieOpts = computeCookieOptions(request, new Date(0));
+  reply.setCookie(config.cookies.accessTokenName, '', {
+    ...expiredCookieOpts,
+    signed: true,
+  });
   return reply
     .status(401)
     .send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
@@ -481,8 +505,9 @@ export default () => {
 
     const { headers } = request;
     const refreshToken = getSignedCookieValue(request, config.cookies.refreshTokenName);
-    const deviceId = headers[config.headers.deviceId];
-
+    // Приоритет: httpOnly cookie > заголовок (fallback для логина/регистрации)
+    const deviceId = getSignedCookieValue(request, config.cookies.deviceIdName)
+      || headers[config.headers.deviceId];
     if (!deviceId || !refreshToken) {
       return handleAuthFailure(request, reply);
     }
