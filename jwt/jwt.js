@@ -159,12 +159,8 @@ redis.on('connect', () => {
 });
 
 // ----- Генерация access-токена -----
-/**
- * Оборачиваем в { payload } для совместимости с ident (Sign({ payload: userObj })).
- * Верификация (jwt.verify → payloadFromToken.payload) ожидает эту структуру.
- */
-function generateAccessToken(userPayload) {
-  return jwt.sign({ payload: userPayload }, privateKey, {
+function generateAccessToken(payload) {
+  return jwt.sign(payload, privateKey, {
     expiresIn: `${config.jwt.expiresIn}m`,
     algorithm: 'RS256',
   });
@@ -362,11 +358,11 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     expired_at: { $gte: currentDate },
   }).populate({
     path: 'userId',
-    select: '_id email phone name roles telegram notification company avatar',
+    select: '_id',
     model: User,
     populate: {
       path: 'company',
-      select: 'currency name address',
+      select: 'currency',
       model: Company,
       populate: { path: 'currency', select: 'code', model: Currencies },
     },
