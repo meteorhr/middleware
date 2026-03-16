@@ -210,10 +210,10 @@ function getSignedCookieValue(request, name) {
 function applyRefreshResult(request, reply, refreshResult) {
   const { userId, token: newRefreshToken } = refreshResult;
   const newAccessToken = generateAccessToken(userId);
-  
+
   const deviceId = getSignedCookieValue(request, config.cookies.deviceIdName)
   || request.headers[config.headers.deviceId];
-  
+
   request.accessToken = newAccessToken;
   request.session = {
     _id: userId._id,
@@ -222,6 +222,10 @@ function applyRefreshResult(request, reply, refreshResult) {
   };
   setAccessTokenCookie(request, reply, newAccessToken);
   setRefreshTokenCookie(request, reply, newRefreshToken);
+  // Ensure deviceId cookie is always set/renewed during refresh
+  if (deviceId) {
+    setDeviceIdCookie(request, reply, deviceId);
+  }
   reply.header(config.headers.authToken, newAccessToken);
 }
 
