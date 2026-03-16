@@ -146,6 +146,19 @@ function safeJsonParse(data) {
   }
 }
 
+function parseRefreshResultFromCache(rawValue, errorPrefix = 'Another process failed to refresh token') {
+  const parsed = safeJsonParse(rawValue);
+  if (!parsed) {
+    throw new TokenRefreshFailedError('Corrupted refresh result data');
+  }
+
+  if (parsed.error) {
+    throw new TokenRefreshFailedError(`${errorPrefix}: ${parsed.message}`);
+  }
+
+  return parsed;
+}
+
 // ----- Проверка доступности Redis -----
 let redisAvailable = true;
 
@@ -248,16 +261,7 @@ async function waitForRefreshResult(resultKey, channel) {
   // Сначала проверяем, есть ли уже результат
   const existingResult = await redis.get(resultKey);
   if (existingResult) {
-    const parsed = safeJsonParse(existingResult);
-    if (!parsed) {
-      throw new TokenRefreshFailedError('Corrupted refresh result data');
-    }
-    if (parsed.error) {
-      throw new TokenRefreshFailedError(
-        `Another process failed to refresh token: ${parsed.message}`,
-      );
-    }
-    return parsed;
+    return parseRefreshResultFromCache(existingResult);
   }
 
   // Используем pub/sub + polling для ожидания результата
@@ -291,12 +295,13 @@ async function waitForRefreshResult(resultKey, channel) {
     subscriber.subscribe(channel).then(() => {
       subscriber.on('message', (_ch, message) => {
         if (settled) return;
-        const result = safeJsonParse(message);
-        if (!result) {
+        try {
+          const result = parseRefreshResultFromCache(message, 'Another process failed');
+          return handleResult(result);
+        } catch (error) {
           cleanup();
-          return reject(new TokenRefreshFailedError('Corrupted refresh result data'));
+          return reject(error);
         }
-        return handleResult(result);
       });
     }).catch(() => {
       // Если pub/sub недоступен — полагаемся на polling
@@ -311,12 +316,13 @@ async function waitForRefreshResult(resultKey, channel) {
       try {
         const resultData = await redis.get(resultKey);
         if (resultData) {
-          const result = safeJsonParse(resultData);
-          if (!result) {
+          try {
+            const result = parseRefreshResultFromCache(resultData, 'Another process failed');
+            return handleResult(result);
+          } catch (error) {
             cleanup();
-            return reject(new TokenRefreshFailedError('Corrupted refresh result data'));
+            return reject(error);
           }
-          return handleResult(result);
         }
       } catch {
         // Redis read error — continue polling
@@ -424,6 +430,27 @@ const RefreshTokenUpdate = async (request, reply) => {
   const resultKey = `result:refresh:${oldRefreshToken}`;
   const channel = `${config.redis.channelPrefix}${oldRefreshToken}`;
 
+  const getCachedRefreshResult = async () => {
+    const cachedResult = await redis.get(resultKey);
+    if (!cachedResult) {
+      return null;
+    }
+    return parseRefreshResultFromCache(cachedResult);
+  };
+
+  // Быстрый путь: токен уже ротирован другим параллельным запросом.
+  // Это закрывает окно гонки, когда старый refreshToken ещё в браузере,
+  // но result уже лежит в Redis.
+  try {
+    const cachedResult = await getCachedRefreshResult();
+    if (cachedResult) {
+      applyRefreshResult(request, reply, cachedResult);
+      return;
+    }
+  } catch (error) {
+    throw error;
+  }
+
   // Уникальный идентификатор владельца лока — защита от удаления чужого лока
   const lockOwner = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 
@@ -450,6 +477,13 @@ const RefreshTokenUpdate = async (request, reply) => {
 
   if (lockAcquired) {
     try {
+      // В случае, когда результат появился между проверкой выше и захватом лока.
+      const cachedResult = await getCachedRefreshResult();
+      if (cachedResult) {
+        applyRefreshResult(request, reply, cachedResult);
+        return;
+      }
+
       const result = await findRefreshTokenAndUpdated(oldRefreshToken, deviceId);
       if (!result) {
         throw new TokenRefreshFailedError(
