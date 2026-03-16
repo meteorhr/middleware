@@ -78,7 +78,6 @@ class TokenRefreshTimeoutError extends Error {
 function isValidDeviceId(deviceId) {
   if (!deviceId || typeof deviceId !== 'string') return false;
   if (deviceId.length > config.deviceIdMaxLength) return false;
-  // Допускаем буквы, цифры, дефисы, подчёркивания, точки
   return /^[a-zA-Z0-9\-_.]+$/.test(deviceId);
 }
 
@@ -95,14 +94,30 @@ function getHostnameFromRequest(request) {
 
 /**
  * Конфигурация куки с учётом хоста/протокола.
- * - localhost/http: secure=false, sameSite=Lax
- * - https-домены: secure=true, sameSite=None (host-only)
+ * Синхронизировано с ident/app/utils/auth-cookie.js:
+ * - localhost/127.0.0.1/.local (по hostname ИЛИ Origin): secure=false, sameSite=Lax
+ * - Все остальные (https): secure=true, sameSite=None (host-only)
  */
 function computeCookieOptions(request, expiresTime) {
   const base = { httpOnly: true, path: '/', expires: expiresTime };
-  const host = (request?.headers?.host || '').toLowerCase();
-  const proto = (request?.headers?.['x-forwarded-proto'] || '').toLowerCase();
-  const isLocal = host.includes('localhost') || host.includes('127.0.0.1') || proto === 'http';
+
+  // Учитываем Origin, чтобы cross-origin запросы с localhost тоже получали Lax
+  let originHost = '';
+  if (request?.headers?.origin) {
+    try {
+      originHost = new URL(request.headers.origin).hostname.toLowerCase();
+    } catch {
+      // ignore invalid origin
+    }
+  }
+
+  const hostname = getHostnameFromRequest(request);
+  const isLocal =
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname.endsWith('.local') ||
+    originHost === 'localhost' ||
+    originHost === '127.0.0.1';
 
   if (isLocal) {
     return { ...base, secure: false, sameSite: 'Lax' };
@@ -144,8 +159,12 @@ redis.on('connect', () => {
 });
 
 // ----- Генерация access-токена -----
-function generateAccessToken(payload) {
-  return jwt.sign(payload, privateKey, {
+/**
+ * Оборачиваем в { payload } для совместимости с ident (Sign({ payload: userObj })).
+ * Верификация (jwt.verify → payloadFromToken.payload) ожидает эту структуру.
+ */
+function generateAccessToken(userPayload) {
+  return jwt.sign({ payload: userPayload }, privateKey, {
     expiresIn: `${config.jwt.expiresIn}m`,
     algorithm: 'RS256',
   });
@@ -184,18 +203,6 @@ function setDeviceIdCookie(request, reply, deviceId) {
   });
 }
 
-function clearAuthCookies(request, reply) {
-  const expiredCookieOpts = computeCookieOptions(request, new Date(0));
-  reply.setCookie(config.cookies.refreshTokenName, '', {
-    ...expiredCookieOpts,
-    signed: true,
-  });
-  reply.setCookie(config.cookies.accessTokenName, '', {
-    ...expiredCookieOpts,
-    signed: true,
-  });
-}
-
 function getSignedCookieValue(request, name) {
   const rawCookieValue = request?.cookies?.[name];
   if (!rawCookieValue) return null;
@@ -212,7 +219,7 @@ function applyRefreshResult(request, reply, refreshResult) {
   const newAccessToken = generateAccessToken(userId);
 
   const deviceId = getSignedCookieValue(request, config.cookies.deviceIdName)
-  || request.headers[config.headers.deviceId];
+    || request.headers[config.headers.deviceId];
 
   request.accessToken = newAccessToken;
   request.session = {
@@ -222,7 +229,6 @@ function applyRefreshResult(request, reply, refreshResult) {
   };
   setAccessTokenCookie(request, reply, newAccessToken);
   setRefreshTokenCookie(request, reply, newRefreshToken);
-  // Ensure deviceId cookie is always set/renewed during refresh
   if (deviceId) {
     setDeviceIdCookie(request, reply, deviceId);
   }
@@ -265,10 +271,21 @@ async function waitForRefreshResult(resultKey, channel) {
     const cleanup = () => {
       if (settled) return;
       settled = true;
-      clearInterval(pollTimer);
+      clearTimeout(pollTimer);
       clearTimeout(timeoutTimer);
       subscriber.unsubscribe(channel).catch(() => {});
       subscriber.disconnect();
+    };
+
+    const handleResult = (result) => {
+      if (result.error) {
+        cleanup();
+        return reject(
+          new TokenRefreshFailedError(`Another process failed: ${result.message}`),
+        );
+      }
+      cleanup();
+      return resolve(result);
     };
 
     // Pub/sub — мгновенное получение результата
@@ -280,21 +297,16 @@ async function waitForRefreshResult(resultKey, channel) {
           cleanup();
           return reject(new TokenRefreshFailedError('Corrupted refresh result data'));
         }
-        cleanup();
-        if (result.error) {
-          return reject(
-            new TokenRefreshFailedError(`Another process failed: ${result.message}`),
-          );
-        }
-        return resolve(result);
+        return handleResult(result);
       });
     }).catch(() => {
       // Если pub/sub недоступен — полагаемся на polling
     });
 
-    // Polling fallback — на случай если pub/sub не сработал
+    // Polling fallback с setTimeout (не setInterval) — предотвращает наложение
+    // async-вызовов, когда Redis.get() занимает больше pollingIntervalMs
     let attempts = 0;
-    pollTimer = setInterval(async () => {
+    const poll = async () => {
       if (settled) return;
       attempts++;
       try {
@@ -305,13 +317,7 @@ async function waitForRefreshResult(resultKey, channel) {
             cleanup();
             return reject(new TokenRefreshFailedError('Corrupted refresh result data'));
           }
-          cleanup();
-          if (result.error) {
-            return reject(
-              new TokenRefreshFailedError(`Another process failed: ${result.message}`),
-            );
-          }
-          return resolve(result);
+          return handleResult(result);
         }
       } catch {
         // Redis read error — continue polling
@@ -319,9 +325,17 @@ async function waitForRefreshResult(resultKey, channel) {
 
       if (attempts >= config.redis.pollingAttempts) {
         cleanup();
-        reject(new TokenRefreshTimeoutError('Timed out waiting for token refresh result.'));
+        return reject(new TokenRefreshTimeoutError('Timed out waiting for token refresh result.'));
       }
-    }, config.redis.pollingIntervalMs);
+
+      // Планируем следующую попытку ПОСЛЕ завершения текущей
+      if (!settled) {
+        pollTimer = setTimeout(poll, config.redis.pollingIntervalMs);
+      }
+    };
+
+    // Запускаем первый poll
+    pollTimer = setTimeout(poll, config.redis.pollingIntervalMs);
 
     // Абсолютный таймаут
     timeoutTimer = setTimeout(() => {
@@ -332,6 +346,13 @@ async function waitForRefreshResult(resultKey, channel) {
 }
 
 // ----- Ротация refresh-токена -----
+/**
+ * Находит refresh-токен в БД по token + deviceId, удаляет его (one-time use),
+ * создаёт новый и возвращает { userId (populated), token (новый UUID) }.
+ *
+ * Populate User включает поля, необходимые для JWT payload — аналогично
+ * тому, что ident кладёт в sessionPayload при логине.
+ */
 const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
   const currentDate = new Date();
 
@@ -341,11 +362,11 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     expired_at: { $gte: currentDate },
   }).populate({
     path: 'userId',
-    select: '_id',
+    select: '_id email phone name roles telegram notification company avatar',
     model: User,
     populate: {
       path: 'company',
-      select: 'currency',
+      select: 'currency name address',
       model: Company,
       populate: { path: 'currency', select: 'code', model: Currencies },
     },
@@ -377,10 +398,15 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
 const RefreshTokenUpdate = async (request, reply) => {
   const { headers } = request;
   const oldRefreshToken = getSignedCookieValue(request, config.cookies.refreshTokenName);
- const deviceId = getSignedCookieValue(request, config.cookies.deviceIdName)
+  const deviceId = getSignedCookieValue(request, config.cookies.deviceIdName)
     || headers[config.headers.deviceId];
+
   if (!oldRefreshToken) {
     throw new TokenRefreshFailedError('Refresh token is missing or invalid');
+  }
+
+  if (!deviceId) {
+    throw new TokenRefreshFailedError('Device ID is missing');
   }
 
   // Если Redis недоступен — выполняем refresh напрямую (без лока)
@@ -475,10 +501,12 @@ function handleServerError(reply, error) {
     .send({ success: false, code: 500, msg: 'Internal Server Error' });
 }
 
-function handleAuthFailure(request, reply) {
- // Очищаем только accessToken, НЕ трогаем refreshToken и deviceId.
-  // Если ошибка временная (Redis/DB), пользователь сможет восстановить сессию.
-  // Полная очистка кук — только при явном logout.
+/**
+ * Мягкий 401: очищаем только accessToken.
+ * Используется для временных ошибок (Redis/DB недоступен) —
+ * refreshToken и deviceId остаются, чтобы следующий запрос смог восстановить сессию.
+ */
+function handleSoftAuthFailure(request, reply) {
   const expiredCookieOpts = computeCookieOptions(request, new Date(0));
   reply.setCookie(config.cookies.accessTokenName, '', {
     ...expiredCookieOpts,
@@ -487,6 +515,31 @@ function handleAuthFailure(request, reply) {
   return reply
     .status(401)
     .send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
+}
+
+/**
+ * Жёсткий 401: очищаем ВСЕ auth-куки (accessToken + refreshToken + deviceId).
+ * Используется когда refresh token подтверждённо невалиден (не найден в БД,
+ * истёк, уже использован) — держать стухший refreshToken cookie бессмысленно,
+ * он только вызывает лишние retry-циклы на клиенте.
+ */
+function handleHardAuthFailure(request, reply) {
+  const expiredCookieOpts = computeCookieOptions(request, new Date(0));
+  reply.setCookie(config.cookies.accessTokenName, '', {
+    ...expiredCookieOpts,
+    signed: true,
+  });
+  reply.setCookie(config.cookies.refreshTokenName, '', {
+    ...expiredCookieOpts,
+    signed: true,
+  });
+  reply.setCookie(config.cookies.deviceIdName, '', {
+    ...expiredCookieOpts,
+    signed: true,
+  });
+  return reply
+    .status(401)
+    .send({ success: false, code: 401, msg: 'Session expired. Please login again.' });
 }
 
 // ----- Экспортируемый хук Fastify -----
@@ -501,7 +554,12 @@ export default () => {
           error instanceof TokenRefreshFailedError ||
           error instanceof TokenRefreshTimeoutError
         ) {
-          return handleAuthFailure(request, reply);
+          // Если ошибка от таймаута Redis — мягкий 401 (refresh cookie ещё валиден)
+          // Если refresh token не найден в БД — жёсткий 401 (cookie бесполезен)
+          if (error instanceof TokenRefreshTimeoutError) {
+            return handleSoftAuthFailure(request, reply);
+          }
+          return handleHardAuthFailure(request, reply);
         }
         return handleServerError(reply, error);
       }
@@ -512,13 +570,14 @@ export default () => {
     // Приоритет: httpOnly cookie > заголовок (fallback для логина/регистрации)
     const deviceId = getSignedCookieValue(request, config.cookies.deviceIdName)
       || headers[config.headers.deviceId];
-    if (!deviceId || !refreshToken) {
-      return handleAuthFailure(request, reply);
+
+    if (!refreshToken || !deviceId) {
+      return handleHardAuthFailure(request, reply);
     }
 
     // Валидация deviceId
     if (!isValidDeviceId(deviceId)) {
-      return handleAuthFailure(request, reply);
+      return handleHardAuthFailure(request, reply);
     }
 
     const accessToken = headers[config.headers.authToken]
@@ -544,9 +603,11 @@ export default () => {
         if (error.name === 'TokenExpiredError') {
           return performTokenRefresh();
         }
-        return handleAuthFailure(request, reply);
+        // Невалидный токен (не expired, а corrupted/подделанный) — жёсткий 401
+        return handleHardAuthFailure(request, reply);
       }
     } else {
+      // Нет accessToken вообще, но есть refreshToken — пробуем обновить
       return performTokenRefresh();
     }
   };
