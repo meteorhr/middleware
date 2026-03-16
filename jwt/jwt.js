@@ -94,7 +94,10 @@ function getHostnameFromRequest(request) {
 
 /**
  * Конфигурация куки с учётом хоста/протокола.
- * Синхронизировано с ident/app/utils/auth-cookie.js:
+ * ВАЖНО: Эта логика ДУБЛИРОВАНА в ident/app/utils/auth-cookie.js.
+ * При изменении здесь — обязательно обновить и там (и наоборот).
+ * TODO: вынести в общий npm-пакет @meteorhr/auth-cookie для единого источника правды.
+ *
  * - localhost/127.0.0.1/.local (по hostname ИЛИ Origin): secure=false, sameSite=Lax
  * - Все остальные (https): secure=true, sameSite=None (host-only)
  */
