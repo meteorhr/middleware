@@ -1,1 +1,6 @@
 jwt/node_modules
+jwt/keys/private.key
+jwt/keys/public.key
+*.pem
+.env
+.env.local
