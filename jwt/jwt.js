@@ -367,7 +367,7 @@ const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
     expired_at: { $gte: currentDate },
   }).populate({
     path: 'userId',
-    select: '_id',
+    select: '_id company',
     model: User,
     populate: {
       path: 'company',
@@ -535,9 +535,14 @@ function handleServerError(reply, error) {
 }
 
 /**
- * Мягкий 401: очищаем только accessToken.
+ * Мягкий сбой: очищаем только accessToken, возвращаем 503.
  * Используется для временных ошибок (Redis/DB недоступен) —
  * refreshToken и deviceId остаются, чтобы следующий запрос смог восстановить сессию.
+ *
+ * Возвращаем 503 (Service Unavailable) вместо 401, чтобы клиент
+ * НЕ интерпретировал это как невалидную сессию и НЕ вызывал logout().
+ * Клиентский 401-interceptor пропустит 503, ошибка дойдёт до вызывающего
+ * кода, пользователь увидит «попробуйте позже», но останется залогиненным.
  */
 function handleSoftAuthFailure(request, reply) {
   const expiredCookieOpts = computeCookieOptions(request, new Date(0));
@@ -546,8 +551,8 @@ function handleSoftAuthFailure(request, reply) {
     signed: true,
   });
   return reply
-    .status(401)
-    .send({ success: false, code: 401, msg: 'Invalid or expired session. Please login again.' });
+    .status(503)
+    .send({ success: false, code: 503, msg: 'Temporary authentication service issue. Please retry.' });
 }
 
 /**
