@@ -20,11 +20,15 @@ const config = {
   },
   redis: {
     lockTtlMs: 5000,
-    resultTtlS: 10,
+    resultTtlS: 120,
     pollingIntervalMs: 200,
     pollingAttempts: 25,
     channelPrefix: 'refresh:done:',
   },
+  // Grace period (ms) during which a used refresh token still resolves to its
+  // replacement.  Covers the case when the response carrying new cookies was
+  // lost (504 / ERR_FAILED) and the client retries with the old token.
+  refreshGracePeriodMs: 120_000,
   headers: {
     deviceId: 'x-device-id',
     authToken: 'x-authentication-token',
@@ -350,10 +354,29 @@ async function waitForRefreshResult(resultKey, channel) {
   });
 }
 
+// ----- Populate-конфигурация для User → Company → Currency -----
+const userPopulateOpts = {
+  path: 'userId',
+  select: '_id company',
+  model: User,
+  populate: {
+    path: 'company',
+    select: 'currency',
+    model: Company,
+    populate: { path: 'currency', select: 'code', model: Currencies },
+  },
+};
+
 // ----- Ротация refresh-токена -----
 /**
- * Находит refresh-токен в БД по token + deviceId, удаляет его (one-time use),
- * создаёт новый и возвращает { userId (populated), token (новый UUID) }.
+ * Находит refresh-токен в БД по token + deviceId, помечает его как
+ * использованный (usedAt) и создаёт новый.
+ *
+ * Вместо findOneAndDelete используется «мягкая ротация» с grace-периодом:
+ * если ответ с новыми cookies не дошёл до клиента (504 / net::ERR_FAILED),
+ * клиент повторно пришлёт старый refresh token. В течение grace-периода
+ * (config.refreshGracePeriodMs) повторный запрос получит тот же результат
+ * (replacedBy), не вызывая hard 401.
  *
  * Populate User включает поля, необходимые для JWT payload — аналогично
  * тому, что ident кладёт в sessionPayload при логине.
@@ -361,42 +384,64 @@ async function waitForRefreshResult(resultKey, channel) {
 const findRefreshTokenAndUpdated = async (refreshToken, deviceId) => {
   const currentDate = new Date();
 
-  const oldTokenDoc = await RefreshToken.findOneAndDelete({
-    token: refreshToken,
-    deviceId,
-    expired_at: { $gte: currentDate },
-  }).populate({
-    path: 'userId',
-    select: '_id company',
-    model: User,
-    populate: {
-      path: 'company',
-      select: 'currency',
-      model: Company,
-      populate: { path: 'currency', select: 'code', model: Currencies },
+  // Phase 1: Atomically claim the token (set usedAt if not yet set).
+  // {usedAt: null} matches both explicit null and missing field.
+  const oldTokenDoc = await RefreshToken.findOneAndUpdate(
+    {
+      token: refreshToken,
+      deviceId,
+      expired_at: { $gte: currentDate },
+      usedAt: null,
     },
-  });
+    { $set: { usedAt: currentDate } },
+  ).populate(userPopulateOpts);
 
-  if (!oldTokenDoc) {
-    return null;
+  if (oldTokenDoc && oldTokenDoc.userId) {
+    // Winner — create replacement token
+    const expiredDate = new Date(
+      currentDate.getTime() + 1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays,
+    );
+
+    const newRefreshToken = new RefreshToken({
+      token: uuidv4(),
+      userId: oldTokenDoc.userId._id,
+      deviceId,
+      expired_at: expiredDate,
+    });
+    await newRefreshToken.save();
+
+    // Record replacement pointer so retries can resolve it
+    await RefreshToken.updateOne(
+      { token: refreshToken },
+      { $set: { replacedBy: newRefreshToken.token } },
+    );
+
+    return { userId: oldTokenDoc.userId.toObject(), token: newRefreshToken.token };
   }
-  if (!oldTokenDoc.userId) {
-    return null;
+
+  // Phase 2: Token already claimed — check grace period for client retry.
+  // The winner may still be writing replacedBy, so poll briefly.
+  const graceFloor = new Date(currentDate.getTime() - config.refreshGracePeriodMs);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const usedDoc = await RefreshToken.findOne({
+      token: refreshToken,
+      deviceId,
+      usedAt: { $gte: graceFloor },
+      replacedBy: { $ne: null },
+    }).populate(userPopulateOpts);
+
+    if (usedDoc && usedDoc.userId) {
+      return { userId: usedDoc.userId.toObject(), token: usedDoc.replacedBy };
+    }
+
+    // Winner may still be processing — wait before retrying
+    if (attempt < 4) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
   }
 
-  const expiredDate = new Date(
-    currentDate.getTime() + 1000 * 60 * 60 * 24 * config.refreshTokenLifetimeDays,
-  );
-
-  const newRefreshToken = new RefreshToken({
-    token: uuidv4(),
-    userId: oldTokenDoc.userId._id,
-    deviceId,
-    expired_at: expiredDate,
-  });
-  await newRefreshToken.save();
-
-  return { userId: oldTokenDoc.userId.toObject(), token: newRefreshToken.token };
+  // No valid token found — truly expired / already used beyond grace period
+  return null;
 };
 
 // ----- Основной refresh-процесс с распределённым локом -----
